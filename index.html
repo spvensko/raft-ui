@@ -1,16 +1,38 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-   <title>RAFT UI Tools</title>
-   <style>
-      body { font-family: sans-serif; max-width: 600px; margin: 50px auto; }
-      a { display: block; margin: 20px 0; font-size: 1.2em; }
-   </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RAFT UI Tools</title>
+    <script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body>
-   <h1>RAFT UI Tools</h1>
-   <a href="manifest-generator.html">Manifest Generator</a>
-   <a href="config-generator.html">Config Generator</a>
-   <a href="lens-viewer.html">LENS Viewer</a>
+<body class="bg-gray-100 min-h-screen p-8">
+    <div class="max-w-2xl mx-auto">
+        <h1 class="text-3xl font-bold text-gray-800 mb-2">RAFT UI Tools</h1>
+        <p class="text-gray-600 mb-8">Standalone web tools for RAFT workflow preparation</p>
+
+        <div class="space-y-4">
+            <a href="manifest-generator.html" class="block bg-white rounded-lg shadow-md p-6 hover:shadow-lg transition">
+                <h2 class="text-xl font-semibold text-blue-600 mb-2">Manifest Generator</h2>
+                <p class="text-gray-600">Create sample manifest TSV files for RAFT workflows</p>
+            </a>
+
+            <a href="config-generator.html" class="block bg-white rounded-lg shadow-md p-6 hover:shadow-lg transition">
+                <h2 class="text-xl font-semibold text-blue-600 mb-2">Config Generator</h2>
+                <p class="text-gray-600">Generate Nextflow configuration files for RAFT workflows</p>
+            </a>
+
+            <a href="lens-viewer.html" class="block bg-white rounded-lg shadow-md p-6 hover:shadow-lg transition">
+                <h2 class="text-xl font-semibold text-blue-600 mb-2">LENS Viewer</h2>
+                <p class="text-gray-600">Visualize and analyze LENS neoantigen prediction results</p>
+            </a>
+        </div>
+
+        <div class="mt-8 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+            <p class="text-sm text-yellow-800">
+                <strong>Note:</strong> These are standalone versions. Use the <strong>Download</strong> buttons to export your work, then transfer files to your RAFT project manually.
+            </p>
+        </div>
+    </div>
 </body>
 </html>

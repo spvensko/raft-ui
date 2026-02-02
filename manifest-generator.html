@@ -194,7 +194,7 @@
           setTimeout(() => { window.close(); }, 1500);
         } catch (error) {
           console.error('Save failed:', error);
-          setSaveStatus('Save failed. Please try again.');
+          setSaveStatus('RAFT CLI not connected. Use Download button instead.');
           setIsSaving(false);
         }
       };
