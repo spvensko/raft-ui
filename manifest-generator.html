@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RAFT Manifest Generator</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://unpkg.com/lucide-react@0.263.0/dist/umd/lucide-react.min.js"></script>
+  <script>
+    window.addEventListener('load', function() {
+      setTimeout(function() {
+        var root = document.getElementById('root');
+        if (root && root.querySelector('p') && root.textContent.includes('Loading RAFT')) {
+          var missing = [];
+          if (typeof React === 'undefined') missing.push('React');
+          if (typeof ReactDOM === 'undefined') missing.push('ReactDOM');
+          if (typeof Babel === 'undefined') missing.push('Babel');
+          if (missing.length > 0) {
+            root.innerHTML = '<div style="padding: 2rem; font-family: system-ui, sans-serif; max-width: 600px;">' +
+              '<h2 style="color: #dc2626; margin-bottom: 1rem;">Failed to load dependencies</h2>' +
+              '<p style="margin-bottom: 0.5rem;">The following CDN resources failed to load: <strong>' + missing.join(', ') + '</strong></p>' +
+              '<p style="color: #666;">This may be due to network issues or a firewall blocking CDN access.</p>' +
+              '<p style="margin-top: 1rem;"><a href="javascript:location.reload()" style="color: #2563eb;">Click here to retry</a></p>' +
+              '</div>';
+          }
+        }
+      }, 3000);
+    });
+  </script>
+</head>
+<body>
+  <div id="root">
+    <div style="padding: 2rem; font-family: system-ui, sans-serif;">
+      <p>Loading RAFT Manifest Generator...</p>
+      <p style="color: #666; font-size: 0.875rem;">If this message persists, check your browser console for errors.</p>
+    </div>
+  </div>
+  <script type="text/babel" data-presets="react" data-type="module">
+    const lucide = typeof lucideReact !== 'undefined' ? lucideReact : {};
+    const IconFallback = ({ children }) => <span style={{display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '1em', height: '1em'}}>{children || '•'}</span>;
+    const Plus = lucide.Plus || (() => <IconFallback>+</IconFallback>);
+    const Trash2 = lucide.Trash2 || (() => <IconFallback>×</IconFallback>);
+    const Download = lucide.Download || (() => <IconFallback>↓</IconFallback>);
+    const Upload = lucide.Upload || (() => <IconFallback>↑</IconFallback>);
+    const AlertCircle = lucide.AlertCircle || (() => <IconFallback>!</IconFallback>);
+    const Info = lucide.Info || (() => <IconFallback>i</IconFallback>);
+    const Users = lucide.Users || (() => <IconFallback>👥</IconFallback>);
+    const Layers = lucide.Layers || (() => <IconFallback>≡</IconFallback>);
+    const Edit2 = lucide.Edit2 || (() => <IconFallback>✎</IconFallback>);
+    const CheckCircle = lucide.CheckCircle || (() => <IconFallback>✓</IconFallback>);
+    const { useState, useEffect, useCallback } = React;
+
+    const API_BASE = window.location.origin;
+
+    const getSessionParams = () => {
+      const params = new URLSearchParams(window.location.search);
+      return {
+        projectId: params.get('project_id') || '',
+        workflow: params.get('workflow') || '',
+        version: params.get('version') || ''
+      };
+    };
+
+    const getSampleType = (runName) => {
+      if (!runName) return null;
+      const prefix = runName.substring(0, 3).toLowerCase();
+      const typeMap = {
+        'ad-': { type: 'Tumor DNA', isNormal: false, isDNA: true },
+        'nd-': { type: 'Normal DNA', isNormal: true, isDNA: true },
+        'ar-': { type: 'Tumor RNA', isNormal: false, isDNA: false },
+        'nr-': { type: 'Normal RNA', isNormal: true, isDNA: false }
+      };
+      return typeMap[prefix] || null;
+    };
+
+    const InfoTooltip = ({ text }) => {
+      const [show, setShow] = useState(false);
+      return (
+        <div className="relative inline-block ml-1">
+          <div onMouseEnter={() => setShow(true)} onMouseLeave={() => setShow(false)} className="cursor-help">
+            <Info size={14} className="text-blue-500" />
+          </div>
+          {show && (
+            <div className="absolute z-50 w-64 p-3 text-xs bg-gray-800 text-white rounded shadow-lg -top-2 left-6 whitespace-pre-line leading-relaxed">
+              {text}
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    const RaftManifestGenerator = () => {
+      const sessionParams = getSessionParams();
+      const [selectedWorkflow, setSelectedWorkflow] = useState(sessionParams.workflow || '');
+      const [editingId, setEditingId] = useState(null);
+      const [showValidationErrors, setShowValidationErrors] = useState(false);
+      const [isSaving, setIsSaving] = useState(false);
+      const [saveStatus, setSaveStatus] = useState('');
+      const [currentSample, setCurrentSample] = useState({
+        Patient_Name: '', Run_Name: '', Dataset: '', File_Prefix: '',
+        Sequencing_Method: 'WES', Group: '', MHC_Alleles: ''
+      });
+      const [samples, setSamples] = useState([]);
+
+      const workflows = [
+        { value: 'lens', label: 'LENS (Tumor Antigens)', description: 'Complete tumor antigen prediction from SNVs, InDels, fusions, splice variants, ERVs, viruses, and CTAs',
+          requirements: { normal_dna: true, tumor_dna: true, tumor_rna: true, normal_rna: false } },
+        { value: 'somatic-snvs', label: 'Somatic SNVs', description: 'Single nucleotide variant calling from paired tumor/normal DNA',
+          requirements: { normal_dna: true, tumor_dna: true, tumor_rna: false, normal_rna: false } },
+        { value: 'somatic-indels', label: 'Somatic InDels', description: 'Insertion/deletion variant calling from paired tumor/normal DNA',
+          requirements: { normal_dna: true, tumor_dna: true, tumor_rna: false, normal_rna: false } },
+        { value: 'gene-fusions', label: 'Gene Fusions', description: 'Detection of fusion genes from tumor RNA-seq data',
+          requirements: { normal_dna: false, tumor_dna: false, tumor_rna: true, normal_rna: false } },
+        { value: 'splice-variants', label: 'Splice Variants', description: 'Identification of aberrant splicing events from tumor RNA',
+          requirements: { normal_dna: false, tumor_dna: false, tumor_rna: true, normal_rna: false } },
+        { value: 'rna-quant', label: 'RNA Quantification', description: 'Transcript abundance estimation from RNA-seq data',
+          requirements: { normal_dna: false, tumor_dna: false, tumor_rna: true, normal_rna: false } },
+        { value: 'hla-typing', label: 'HLA Typing', description: 'HLA allele determination from DNA sequencing data',
+          requirements: { normal_dna: true, tumor_dna: false, tumor_rna: false, normal_rna: false } },
+        { value: 'viral-detection', label: 'Viral Detection', description: 'Identification of viral sequences in tumor RNA',
+          requirements: { normal_dna: false, tumor_dna: false, tumor_rna: true, normal_rna: false } },
+        { value: 'erv-detection', label: 'ERV Detection', description: 'Detection of endogenous retrovirus expression in tumor RNA',
+          requirements: { normal_dna: false, tumor_dna: false, tumor_rna: true, normal_rna: false } }
+      ];
+
+      const sequencingMethods = ['WES', 'WGS', 'RNA-Seq', 'Targeted'];
+
+      const normalizeMHCAlleles = (alleles) => {
+        if (!alleles) return '';
+        return alleles.split(',').map(allele => {
+          let normalized = allele.trim().replace(/\*/g, '');
+          if (normalized.match(/^HLA-[A-Z]\d{4}$/)) {
+            normalized = normalized.replace(/^(HLA-[A-Z])(\d{2})(\d{2})$/, '$1$2:$3');
+          }
+          if (normalized.match(/^H2[A-Z][a-z]$/)) {
+            normalized = normalized.replace(/^H2([A-Z][a-z])$/, 'H-2-$1');
+          }
+          return normalized;
+        }).join(',');
+      };
+
+      const handleMHCAllelesChange = (value) => {
+        const normalized = normalizeMHCAlleles(value);
+        setCurrentSample({ ...currentSample, MHC_Alleles: normalized });
+      };
+
+      const generateTSV = useCallback(() => {
+        const headers = ['Patient_Name', 'Run_Name', 'Dataset', 'File_Prefix', 'Sequencing_Method', 'Normal', 'Group', 'Alleles'];
+        const rows = samples.map(s => {
+          const sampleType = getSampleType(s.Run_Name);
+          const isNormal = sampleType ? sampleType.isNormal : false;
+          return [s.Patient_Name, s.Run_Name, s.Dataset, s.File_Prefix, s.Sequencing_Method,
+            isNormal ? 'TRUE' : 'FALSE', s.Group || '', s.MHC_Alleles || ''];
+        });
+        return [headers.join('\t'), ...rows.map(r => r.join('\t'))].join('\n');
+      }, [samples]);
+
+      useEffect(() => {
+        if (samples.length === 0) return;
+        const autoSave = async () => {
+          try {
+            await fetch(`${API_BASE}/api/autosave`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ state: { samples, selectedWorkflow, currentSample, timestamp: new Date().toISOString() } })
+            });
+          } catch (error) { console.warn('Auto-save failed:', error); }
+        };
+        const interval = setInterval(autoSave, 5000);
+        return () => clearInterval(interval);
+      }, [samples, selectedWorkflow, currentSample]);
+
+      const saveToRaft = async () => {
+        if (samples.length === 0) { alert('No samples to save. Please add samples first.'); return; }
+        setIsSaving(true); setSaveStatus('Saving...');
+        try {
+          const tsvContent = generateTSV();
+          const datasetName = samples[0]?.Dataset || 'manifest';
+          const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+          const filename = `${datasetName}.${dateStr}.manifest.tsv`;
+          const saveResponse = await fetch(`${API_BASE}/api/save-manifest`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content: tsvContent, filename })
+          });
+          if (!saveResponse.ok) throw new Error('Failed to save manifest');
+          const completeResponse = await fetch(`${API_BASE}/api/complete`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'use' })
+          });
+          if (!completeResponse.ok) throw new Error('Failed to signal completion');
+          setSaveStatus('Saved! You can close this window.');
+          setTimeout(() => { window.close(); }, 1500);
+        } catch (error) {
+          console.error('Save failed:', error);
+          setSaveStatus('Save failed. Please try again.');
+          setIsSaving(false);
+        }
+      };
+
+      const downloadManifest = () => {
+        if (samples.length === 0) { alert('No samples to download. Please add samples first.'); return; }
+        const datasetName = samples[0]?.Dataset || 'manifest';
+        const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+        const tsv = generateTSV();
+        const blob = new Blob([tsv], { type: 'text/tab-separated-values' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = `${datasetName}.${dateStr}.manifest.tsv`;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      };
+
+      const validateCurrentSample = () => {
+        const errors = [];
+        if (!currentSample.Patient_Name) errors.push('Patient Name required');
+        if (!currentSample.Run_Name) {
+          errors.push('Run Name required');
+        } else if (!currentSample.Run_Name.match(/^(ad|nd|ar|nr)[-_]/i)) {
+          errors.push('Run Name must start with ad-, nd-, ar-, or nr-');
+        } else {
+          const duplicateRunName = samples.find(s =>
+            s.id !== editingId && s.Patient_Name === currentSample.Patient_Name && s.Run_Name === currentSample.Run_Name
+          );
+          if (duplicateRunName) errors.push(`Run Name "${currentSample.Run_Name}" is already used for patient "${currentSample.Patient_Name}"`);
+        }
+        if (!currentSample.Dataset) errors.push('Dataset required');
+        if (!currentSample.File_Prefix) errors.push('File Prefix required');
+        const finalGroup = currentSample.Group || currentSample.Patient_Name;
+        const groupPatients = samples.filter(s => s.id !== editingId && s.Group === finalGroup && s.Patient_Name).map(s => s.Patient_Name);
+        const uniquePatients = [...new Set(groupPatients)];
+        if (currentSample.Patient_Name && uniquePatients.length > 0 && !uniquePatients.includes(currentSample.Patient_Name)) {
+          errors.push(`Group "${finalGroup}" is already used for patient(s): ${uniquePatients.join(', ')}`);
+        }
+        return errors;
+      };
+
+      const getFilePrefixWarning = () => {
+        if (!currentSample.File_Prefix) return null;
+        const duplicateFilePrefix = samples.filter(s => s.id !== editingId && s.File_Prefix === currentSample.File_Prefix);
+        if (duplicateFilePrefix.length > 0) {
+          const patients = [...new Set(duplicateFilePrefix.map(s => s.Patient_Name))];
+          return `File Prefix "${currentSample.File_Prefix}" is already used for ${patients.join(', ')}. Consider using Groups to organize multiple timepoints for the same sample, or use "UNIV" for shared samples across patients.`;
+        }
+        return null;
+      };
+
+      const getWorkflowWarnings = () => {
+        if (!selectedWorkflow) return {};
+        const workflow = workflows.find(w => w.value === selectedWorkflow);
+        if (!workflow) return {};
+        const warningsByDatasetPatientGroup = {};
+        samples.forEach(sample => {
+          if (!sample.Patient_Name || !sample.Run_Name || !sample.Dataset) return;
+          const groups = sample.Group ? sample.Group.split('-').map(g => g.trim()) : ['ungrouped'];
+          groups.forEach(group => {
+            const key = `${sample.Dataset}|||${sample.Patient_Name}|||${group}`;
+            if (!warningsByDatasetPatientGroup[key]) {
+              warningsByDatasetPatientGroup[key] = { dataset: sample.Dataset, patient: sample.Patient_Name, group, normal_dna: false, tumor_dna: false, tumor_rna: false, normal_rna: false };
+            }
+            const sampleType = getSampleType(sample.Run_Name);
+            if (sampleType) {
+              const types = warningsByDatasetPatientGroup[key];
+              if (sampleType.type === 'Normal DNA') types.normal_dna = true;
+              if (sampleType.type === 'Tumor DNA') types.tumor_dna = true;
+              if (sampleType.type === 'Tumor RNA') types.tumor_rna = true;
+              if (sampleType.type === 'Normal RNA') types.normal_rna = true;
+            }
+          });
+        });
+        const warnings = {};
+        Object.entries(warningsByDatasetPatientGroup).forEach(([key, types]) => {
+          const missing = [];
+          if (workflow.requirements.normal_dna && !types.normal_dna) missing.push('Normal DNA');
+          if (workflow.requirements.tumor_dna && !types.tumor_dna) missing.push('Tumor DNA');
+          if (workflow.requirements.tumor_rna && !types.tumor_rna) missing.push('Tumor RNA');
+          if (workflow.requirements.normal_rna && !types.normal_rna) missing.push('Normal RNA');
+          if (missing.length > 0) {
+            if (!warnings[types.dataset]) warnings[types.dataset] = {};
+            if (!warnings[types.dataset][types.patient]) warnings[types.dataset][types.patient] = {};
+            warnings[types.dataset][types.patient][types.group] = missing.join(', ');
+          }
+        });
+        return warnings;
+      };
+
+      const addOrUpdateSample = () => {
+        const errors = validateCurrentSample();
+        if (errors.length > 0) { setShowValidationErrors(true); return; }
+        const sampleToAdd = { ...currentSample, Group: currentSample.Group || currentSample.Patient_Name };
+        if (editingId !== null) {
+          setSamples(samples.map(s => s.id === editingId ? { ...sampleToAdd, id: editingId } : s));
+          setEditingId(null);
+        } else {
+          const newId = samples.length > 0 ? Math.max(...samples.map(s => s.id)) + 1 : 1;
+          setSamples([...samples, { ...sampleToAdd, id: newId }]);
+        }
+        setShowValidationErrors(false);
+        setCurrentSample({ Patient_Name: '', Run_Name: '', Dataset: '', File_Prefix: '', Sequencing_Method: 'WES', Group: '', MHC_Alleles: '' });
+      };
+
+      const editSample = (sample) => {
+        setCurrentSample({
+          Patient_Name: sample.Patient_Name, Run_Name: sample.Run_Name, Dataset: sample.Dataset,
+          File_Prefix: sample.File_Prefix, Sequencing_Method: sample.Sequencing_Method,
+          Group: sample.Group === sample.Patient_Name ? '' : sample.Group, MHC_Alleles: sample.MHC_Alleles || ''
+        });
+        setEditingId(sample.id);
+      };
+
+      const removeSample = (id) => setSamples(samples.filter(s => s.id !== id));
+
+      const applyPrefix = (prefix) => {
+        const identifier = currentSample.Run_Name.replace(/^(ad-|nd-|ar-|nr-)/i, '');
+        setCurrentSample({ ...currentSample, Run_Name: prefix + identifier });
+      };
+
+      const importFromTSV = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (event) => {
+          const text = event.target.result;
+          const lines = text.split('\n').filter(l => l.trim());
+          if (lines.length < 2) return;
+          const headers = lines[0].split('\t');
+          const newSamples = lines.slice(1).map((line, idx) => {
+            const values = line.split('\t');
+            const sample = { id: idx + 1 };
+            headers.forEach((header, i) => { if (header !== 'Normal') sample[header] = values[i] || ''; });
+            if (!sample.MHC_Alleles) sample.MHC_Alleles = '';
+            return sample;
+          });
+          setSamples(newSamples);
+        };
+        reader.readAsText(file);
+      };
+
+      const organizedSamples = () => {
+        const result = {};
+        samples.forEach(sample => {
+          if (!sample.Patient_Name || !sample.Dataset) return;
+          const dataset = sample.Dataset;
+          const patient = sample.Patient_Name;
+          if (!result[dataset]) result[dataset] = {};
+          if (!result[dataset][patient]) result[dataset][patient] = {};
+          let groupList = sample.Group ? sample.Group.split('-').map(g => g.trim()).filter(g => g.length > 0) : [];
+          if (groupList.length === 0) groupList = [patient];
+          groupList.forEach(group => {
+            if (!result[dataset][patient][group]) result[dataset][patient][group] = [];
+            result[dataset][patient][group].push(sample);
+          });
+        });
+        return result;
+      };
+
+      const currentErrors = validateCurrentSample();
+      const filePrefixWarning = getFilePrefixWarning();
+      const workflowWarnings = getWorkflowWarnings();
+      const organized = organizedSamples();
+      const currentSampleType = getSampleType(currentSample.Run_Name);
+
+      return (
+        <div className="min-h-screen bg-gray-50 p-4 md:p-6">
+          <div className="max-w-7xl mx-auto space-y-4">
+            <div className="bg-white rounded-lg shadow-md p-4 md:p-6">
+              <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+                <h1 className="text-2xl md:text-3xl font-bold text-gray-800">RAFT Manifest Generator</h1>
+                <div className="flex flex-wrap gap-2 items-center">
+                  {saveStatus && <span className={`text-sm ${saveStatus.includes('failed') ? 'text-red-600' : 'text-green-600'}`}>{saveStatus}</span>}
+                  <label className="cursor-pointer px-3 py-2 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 transition flex items-center gap-2">
+                    <Upload size={16} /> Import TSV
+                    <input type="file" accept=".tsv,.txt" onChange={importFromTSV} className="hidden" />
+                  </label>
+                  <button onClick={downloadManifest} className="px-3 py-2 text-sm bg-gray-600 text-white rounded-md hover:bg-gray-700 transition flex items-center gap-2">
+                    <Download size={16} /> Download
+                  </button>
+                  <button onClick={saveToRaft} disabled={isSaving || samples.length === 0}
+                    className={`px-3 py-2 text-sm rounded-md transition flex items-center gap-2 ${isSaving || samples.length === 0 ? 'bg-green-400 cursor-not-allowed' : 'bg-green-600 hover:bg-green-700'} text-white`}>
+                    <CheckCircle size={16} /> {isSaving ? 'Saving...' : 'Save to RAFT'}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-white rounded-lg shadow-md p-4 md:p-6">
+              <label className="block text-base font-semibold text-gray-800 mb-2">Select Workflow</label>
+              <select value={selectedWorkflow} onChange={(e) => setSelectedWorkflow(e.target.value)}
+                className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500">
+                <option value="">-- No workflow selected --</option>
+                {workflows.map(w => <option key={w.value} value={w.value}>{w.label}</option>)}
+              </select>
+            </div>
+
+            <div className="bg-white rounded-lg shadow-md p-4 md:p-6">
+              <h3 className="text-base font-semibold text-gray-700 mb-3">{editingId !== null ? 'Edit Sample' : 'Add a Sample'}</h3>
+              {showValidationErrors && currentErrors.length > 0 && (
+                <div className="bg-red-50 border border-red-200 rounded-md p-2 mb-3 flex items-start gap-2">
+                  <AlertCircle className="text-red-600 flex-shrink-0 mt-0.5" size={16} />
+                  <div className="text-xs text-red-800">{currentErrors.map((err, i) => <div key={i}>{err}</div>)}</div>
+                </div>
+              )}
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">
+                    Patient Name *
+                    <InfoTooltip text="Identifier for the patient. Use 'UNIV' for universal samples shared across patients." />
+                  </label>
+                  <input type="text" value={currentSample.Patient_Name} onChange={(e) => setCurrentSample({ ...currentSample, Patient_Name: e.target.value })}
+                    placeholder="e.g., Pt01 or UNIV" className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500" />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">
+                    Run Name *
+                    <InfoTooltip text={`Format: prefix-identifier\n\nPrefix options:\n• ad- = Abnormal (tumor) DNA\n• nd- = Normal DNA\n• ar- = Abnormal (tumor) RNA\n• nr- = Normal RNA\n\nExample: ad-Pt01-03A`} />
+                  </label>
+                  <div className="flex gap-1">
+                    <select onChange={(e) => applyPrefix(e.target.value)} className="px-1.5 py-1.5 border border-gray-300 rounded-l-md bg-gray-50 text-xs">
+                      <option value="">Prefix</option>
+                      <option value="ad-">ad-</option>
+                      <option value="nd-">nd-</option>
+                      <option value="ar-">ar-</option>
+                      <option value="nr-">nr-</option>
+                    </select>
+                    <input type="text" value={currentSample.Run_Name} onChange={(e) => setCurrentSample({ ...currentSample, Run_Name: e.target.value })}
+                      placeholder="e.g., ad-Pt01-03A" className="flex-1 px-2 py-1.5 text-sm border border-gray-300 rounded-r-md focus:ring-2 focus:ring-blue-500" />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Sample Type <InfoTooltip text="Determined by Run Name prefix" /></label>
+                  <div className="w-full px-2 py-1.5 border border-gray-200 rounded-md bg-gray-50 text-sm">
+                    {currentSampleType ? <span className={`font-medium ${currentSampleType.isNormal ? 'text-green-700' : 'text-purple-700'}`}>{currentSampleType.type}</span> : <span className="text-gray-400">Determined by Run Name</span>}
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Dataset * <InfoTooltip text="Dataset identifier for grouping samples" /></label>
+                  <input type="text" value={currentSample.Dataset} onChange={(e) => setCurrentSample({ ...currentSample, Dataset: e.target.value })}
+                    placeholder="e.g., MyDataset" className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500" />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">
+                    File Prefix *
+                    <InfoTooltip text={`FASTQ base name without read number or extension.\n\nExample: For files named sample_1.fastq.gz and sample_2.fastq.gz, use 'sample'\n\nEnsure FASTQs are available in your RAFT fastqs/ directory.`} />
+                  </label>
+                  <input type="text" value={currentSample.File_Prefix} onChange={(e) => setCurrentSample({ ...currentSample, File_Prefix: e.target.value })}
+                    placeholder="e.g., sample" className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500" />
+                  {filePrefixWarning && (
+                    <div className="bg-yellow-50 border border-yellow-200 rounded-md p-2 mt-1 flex items-start gap-2">
+                      <AlertCircle className="text-yellow-600 flex-shrink-0 mt-0.5" size={14} />
+                      <div className="text-xs text-yellow-900">{filePrefixWarning}</div>
+                    </div>
+                  )}
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Sequencing Method *</label>
+                  <select value={currentSample.Sequencing_Method} onChange={(e) => setCurrentSample({ ...currentSample, Sequencing_Method: e.target.value })}
+                    className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500">
+                    {sequencingMethods.map(m => <option key={m} value={m}>{m}</option>)}
+                  </select>
+                </div>
+                <div className="md:col-span-2 lg:col-span-3">
+                  <label className="block text-xs font-medium text-gray-700 mb-1">
+                    Group (hyphen delimited)
+                    <InfoTooltip text={`Optional group identifier for subjoin functionality.\n\nRules:\n• Must be unique per patient\n• Use hyphen for multiple groups (e.g., '1-2')\n• Defaults to Patient Name if not specified\n\nExamples: 1, timepoint1, 1-2`} />
+                  </label>
+                  <input type="text" value={currentSample.Group} onChange={(e) => setCurrentSample({ ...currentSample, Group: e.target.value })}
+                    placeholder="e.g., 1, 1-2, timepoint1 (defaults to <Patient_Name>)" className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500" />
+                </div>
+                <div className="md:col-span-2 lg:col-span-3">
+                  <label className="block text-xs font-medium text-gray-700 mb-1">
+                    MHC Alleles (comma delimited)
+                    <InfoTooltip text={`MHC/HLA allele identifiers for the sample. Alleles will be automatically formatted to the correct standard.\n\nFormat examples:\n• Homo sapiens: HLA-A02:01,HLA-A01:01,HLA-B08:01,HLA-B27:05,HLA-C01:02,HLA-C07:01\n• Mus musculus: H-2-Kb,H-2-Db\n\nNote: For human samples, HLA alleles will be computationally called if not provided.`} />
+                  </label>
+                  <input type="text" value={currentSample.MHC_Alleles} onChange={(e) => handleMHCAllelesChange(e.target.value)}
+                    placeholder="e.g., HLA-A02:01,HLA-B08:01 or H-2-Kb,H-2-Db" className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500" />
+                </div>
+              </div>
+              <button onClick={addOrUpdateSample} className="mt-4 w-full py-2 rounded-md transition flex items-center justify-center gap-2 text-sm font-medium bg-indigo-600 text-white hover:bg-indigo-700">
+                <Plus size={16} /> {editingId !== null ? 'Update Sample' : 'Add Sample'}
+              </button>
+            </div>
+
+            {Object.keys(organized).length > 0 && (
+              <div className="bg-white rounded-lg shadow-md p-4 md:p-6">
+                <h2 className="text-lg font-bold text-gray-800 mb-3 flex items-center gap-2"><Users size={20} /> Sample Overview</h2>
+                <div className="space-y-4">
+                  {Object.entries(organized).map(([dataset, patients]) => (
+                    <div key={dataset} className="border-2 border-indigo-200 rounded-md p-3 bg-indigo-50">
+                      <h3 className="text-base font-bold text-indigo-900 mb-3">Dataset: {dataset}</h3>
+                      <div className="space-y-4">
+                        {Object.entries(patients).map(([patient, groups]) => (
+                          <div key={patient} className="border border-gray-200 rounded-md p-3 bg-white">
+                            <h4 className="text-sm font-semibold text-gray-700 mb-2">Patient: {patient}</h4>
+                            <div className="space-y-3">
+                              {Object.entries(groups).map(([group, groupSamples]) => {
+                                if (!Array.isArray(groupSamples)) return null;
+                                const hasWarning = workflowWarnings[dataset] && workflowWarnings[dataset][patient] && workflowWarnings[dataset][patient][group];
+                                return (
+                                  <div key={group} className="bg-gray-50 rounded-lg p-3">
+                                    <div className="flex items-center gap-2 mb-2">
+                                      <Layers size={16} className="text-gray-600" />
+                                      <h5 className="font-medium text-gray-700">Group: {group}</h5>
+                                    </div>
+                                    {hasWarning && (
+                                      <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-2 mb-3 flex items-start gap-2">
+                                        <AlertCircle className="text-yellow-600 flex-shrink-0 mt-0.5" size={16} />
+                                        <div className="text-xs text-yellow-900">
+                                          <span className="font-semibold">Missing for {workflows.find(w => w.value === selectedWorkflow)?.label}:</span>{' '}
+                                          {workflowWarnings[dataset][patient][group]}
+                                        </div>
+                                      </div>
+                                    )}
+                                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+                                      {groupSamples.map((s, idx) => {
+                                        const sampleType = getSampleType(s.Run_Name);
+                                        return (
+                                          <div key={`${s.id}-${idx}`} className="bg-white p-3 rounded border border-gray-200 flex items-start justify-between">
+                                            <div className="flex-1">
+                                              <div className="text-sm font-medium text-gray-800">{s.Run_Name}</div>
+                                              {sampleType && <div className={`text-xs mt-1 ${sampleType.isNormal ? 'text-green-600' : 'text-purple-600'}`}>{sampleType.type}</div>}
+                                              <div className="text-xs text-gray-500 mt-1">{s.Sequencing_Method}</div>
+                                              <div className="text-xs text-gray-400 mt-1">File Prefix: {s.File_Prefix}</div>
+                                            </div>
+                                            <div className="flex gap-1 ml-2">
+                                              <button onClick={() => editSample(s)} className="text-blue-600 hover:text-blue-800" title="Edit sample"><Edit2 size={14} /></button>
+                                              <button onClick={() => removeSample(s.id)} className="text-red-600 hover:text-red-800" title="Remove sample"><Trash2 size={14} /></button>
+                                            </div>
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    };
+
+    try {
+      const root = ReactDOM.createRoot(document.getElementById('root'));
+      root.render(<RaftManifestGenerator />);
+    } catch (error) {
+      console.error('Failed to render RAFT Manifest Generator:', error);
+      document.getElementById('root').innerHTML =
+        '<div style="padding: 2rem; font-family: system-ui, sans-serif; max-width: 600px;">' +
+        '<h2 style="color: #dc2626; margin-bottom: 1rem;">Application Error</h2>' +
+        '<p style="margin-bottom: 0.5rem;">Failed to initialize the manifest generator.</p>' +
+        '<pre style="background: #f3f4f6; padding: 1rem; border-radius: 0.5rem; overflow: auto; font-size: 0.75rem;">' +
+        error.toString() + '</pre>' +
+        '<p style="margin-top: 1rem;"><a href="javascript:location.reload()" style="color: #2563eb;">Click here to retry</a></p>' +
+        '</div>';
+    }
+  </script>
+</body>
+</html>

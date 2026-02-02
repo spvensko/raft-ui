@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LENS Viewer</title>
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://unpkg.com/lucide-react@0.263.0/dist/umd/lucide-react.min.js"></script>
+  <script src="https://unpkg.com/d3@7/dist/d3.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel" data-presets="react">
+    const { useState, useMemo, useEffect } = React;
+    const { Upload, ChevronDown, ChevronRight, ChevronLeft, Download, Filter, X, Loader } = lucideReact;
+
+    const API_BASE = window.location.origin;
+
+    const getUrlParams = () => {
+      const params = new URLSearchParams(window.location.search);
+      return {
+        preload: params.get('preload') || '',
+        projectId: params.get('project_id') || ''
+      };
+    };
+
+    const LENSViewer = () => {
+      const [patients, setPatients] = useState({});
+      const [selectedPatient, setSelectedPatient] = useState(null);
+      const [topN, setTopN] = useState(25);
+      const [sortMetric, setSortMetric] = useState('priority_score_maximum');
+      const [selectedAlleles, setSelectedAlleles] = useState(new Set());
+      const [isPreloading, setIsPreloading] = useState(false);
+      const [preloadError, setPreloadError] = useState('');
+
+      const priorityMetrics = [
+        { value: 'priority_score_maximum', label: 'Maximum Priority Score' },
+        { value: 'priority_score_mhcflurry', label: 'MHCFlurry Priority Score' },
+        { value: 'mhcflurry_2.1.1.aff', label: 'MHCFlurry Binding Affinity' },
+        { value: 'ccf', label: 'Cancer Cell Fraction' },
+        { value: 'vaf', label: 'Variant Allele Frequency' },
+      ];
+
+      const parseFileContent = (filename, content, parsedPatients) => {
+        const lines = content.split('\n');
+        if (lines.length < 2) return parsedPatients;
+        const headers = lines[0].split('\t');
+        const match = filename.match(/^[^-]+-([^-]+)-ad-/);
+        const patientId = match ? match[1] : filename.split('_')[0];
+        const data = [];
+        for (let i = 1; i < lines.length; i++) {
+          if (!lines[i].trim()) continue;
+          const values = lines[i].split('\t');
+          const row = {};
+          headers.forEach((header, idx) => { row[header] = values[idx]; });
+          data.push(row);
+        }
+        if (!parsedPatients[patientId]) {
+          parsedPatients[patientId] = { id: patientId, files: [], data: [], alleles: new Set() };
+        }
+        parsedPatients[patientId].files.push(filename);
+        parsedPatients[patientId].data.push(...data);
+        data.forEach(row => { if (row.allele) parsedPatients[patientId].alleles.add(row.allele); });
+        return parsedPatients;
+      };
+
+      useEffect(() => {
+        const urlParams = getUrlParams();
+        if (!urlParams.preload) return;
+        const loadFiles = async () => {
+          setIsPreloading(true);
+          try {
+            const listResp = await fetch(`${API_BASE}/api/files?dir=${encodeURIComponent(urlParams.preload)}`);
+            if (!listResp.ok) throw new Error('Failed to list files');
+            const { files } = await listResp.json();
+            if (files.length === 0) { setPreloadError('No TSV files found.'); setIsPreloading(false); return; }
+            let parsed = {};
+            for (const file of files) {
+              const contentResp = await fetch(`${API_BASE}/api/file-content?path=${encodeURIComponent(file.path)}`);
+              if (contentResp.ok) {
+                const { name, content } = await contentResp.json();
+                parsed = parseFileContent(name, content, parsed);
+              }
+            }
+            setPatients({...parsed});
+            const firstId = Object.keys(parsed).sort()[0];
+            if (firstId) { setSelectedPatient(firstId); setSelectedAlleles(new Set(parsed[firstId].alleles)); }
+          } catch (e) { setPreloadError(`Load failed: ${e.message}`); }
+          setIsPreloading(false);
+        };
+        loadFiles();
+      }, []);
+
+      const handleFileUpload = (e) => {
+        const fileList = Array.from(e.target.files);
+        let parsed = {};
+        let processed = 0;
+        fileList.forEach(file => {
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            parsed = parseFileContent(file.name, ev.target.result, parsed);
+            processed++;
+            if (processed === fileList.length) {
+              setPatients({...parsed});
+              const firstId = Object.keys(parsed).sort()[0];
+              if (firstId) { setSelectedPatient(firstId); setSelectedAlleles(new Set(parsed[firstId].alleles)); }
+            }
+          };
+          reader.readAsText(file);
+        });
+      };
+
+      const currentData = useMemo(() => {
+        if (!selectedPatient || !patients[selectedPatient]) return [];
+        let data = patients[selectedPatient].data;
+        if (selectedAlleles.size > 0) data = data.filter(row => selectedAlleles.has(row.allele));
+        data.sort((a, b) => parseFloat(b[sortMetric] || 0) - parseFloat(a[sortMetric] || 0));
+        return data.slice(0, topN);
+      }, [selectedPatient, patients, selectedAlleles, sortMetric, topN]);
+
+      if (Object.keys(patients).length === 0) {
+        return (
+          <div style={{ minHeight: '100vh', background: '#f8f9fa', padding: '2rem' }}>
+            <div style={{ maxWidth: '800px', margin: '4rem auto', textAlign: 'center', background: '#fff', padding: '3rem', borderRadius: '16px', boxShadow: '0 8px 32px rgba(0,0,0,0.08)' }}>
+              {isPreloading ? (
+                <>
+                  <Loader size={64} style={{ margin: '0 auto 1.5rem', animation: 'spin 1s linear infinite' }} />
+                  <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+                  <h2 style={{ fontSize: '1.75rem', marginBottom: '1rem' }}>Loading LENS Reports...</h2>
+                </>
+              ) : (
+                <>
+                  {preloadError && <div style={{ background: '#fff5f5', border: '1px solid #feb2b2', padding: '1rem', marginBottom: '1.5rem', color: '#c53030', borderRadius: '8px' }}>{preloadError}</div>}
+                  <Upload size={64} style={{ margin: '0 auto 1.5rem', color: '#495057' }} />
+                  <h2 style={{ fontSize: '1.75rem', marginBottom: '1rem' }}>Upload LENS Reports</h2>
+                  <p style={{ color: '#6c757d', marginBottom: '2rem' }}>Select TSV report files to begin analysis.</p>
+                  <label style={{ display: 'inline-block', padding: '1rem 2.5rem', background: 'linear-gradient(135deg, #ff6b6b 0%, #ee5a6f 100%)', color: '#fff', borderRadius: '8px', cursor: 'pointer', fontSize: '1.1rem', fontWeight: 600 }}>
+                    Choose Files
+                    <input type="file" multiple accept=".tsv,.txt" onChange={handleFileUpload} style={{ display: 'none' }} />
+                  </label>
+                </>
+              )}
+            </div>
+          </div>
+        );
+      }
+
+      return (
+        <div style={{ minHeight: '100vh', background: '#f8f9fa' }}>
+          <div style={{ background: '#fff', borderBottom: '1px solid #dee2e6', padding: '1rem 2rem' }}>
+            <h1 style={{ fontSize: '1.5rem', fontWeight: 700, color: '#212529' }}>LENS Viewer</h1>
+          </div>
+          <div style={{ display: 'flex', height: 'calc(100vh - 60px)' }}>
+            <div style={{ width: '250px', background: '#fff', borderRight: '1px solid #dee2e6', padding: '1rem', overflow: 'auto' }}>
+              <h3 style={{ fontSize: '0.875rem', fontWeight: 600, marginBottom: '1rem', color: '#495057' }}>Patients</h3>
+              {Object.keys(patients).sort().map(id => (
+                <div key={id} onClick={() => { setSelectedPatient(id); setSelectedAlleles(new Set(patients[id].alleles)); }}
+                  style={{ padding: '0.75rem', marginBottom: '0.5rem', borderRadius: '8px', cursor: 'pointer', background: selectedPatient === id ? '#e7f5ff' : '#f8f9fa', border: selectedPatient === id ? '1px solid #339af0' : '1px solid transparent' }}>
+                  <div style={{ fontWeight: 500 }}>{id}</div>
+                  <div style={{ fontSize: '0.75rem', color: '#868e96' }}>{patients[id].files.length} file(s)</div>
+                </div>
+              ))}
+            </div>
+            <div style={{ flex: 1, padding: '1.5rem', overflow: 'auto' }}>
+              <div style={{ display: 'flex', gap: '1rem', marginBottom: '1.5rem', flexWrap: 'wrap' }}>
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: 500, marginBottom: '0.5rem' }}>Sort By</label>
+                  <select value={sortMetric} onChange={(e) => setSortMetric(e.target.value)} style={{ padding: '0.5rem', border: '1px solid #dee2e6', borderRadius: '4px' }}>
+                    {priorityMetrics.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: 500, marginBottom: '0.5rem' }}>Top N</label>
+                  <input type="number" value={topN} onChange={(e) => setTopN(parseInt(e.target.value) || 25)} style={{ padding: '0.5rem', border: '1px solid #dee2e6', borderRadius: '4px', width: '80px' }} />
+                </div>
+              </div>
+              <div style={{ background: '#fff', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', overflow: 'hidden' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.875rem' }}>
+                  <thead>
+                    <tr style={{ background: '#f8f9fa' }}>
+                      <th style={{ padding: '0.75rem', textAlign: 'left', borderBottom: '1px solid #dee2e6' }}>Peptide</th>
+                      <th style={{ padding: '0.75rem', textAlign: 'left', borderBottom: '1px solid #dee2e6' }}>Allele</th>
+                      <th style={{ padding: '0.75rem', textAlign: 'right', borderBottom: '1px solid #dee2e6' }}>{priorityMetrics.find(m => m.value === sortMetric)?.label || sortMetric}</th>
+                      <th style={{ padding: '0.75rem', textAlign: 'left', borderBottom: '1px solid #dee2e6' }}>Source</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {currentData.map((row, idx) => (
+                      <tr key={idx} style={{ borderBottom: '1px solid #f1f3f4' }}>
+                        <td style={{ padding: '0.75rem', fontFamily: 'monospace' }}>{row.peptide || '-'}</td>
+                        <td style={{ padding: '0.75rem' }}>{row.allele || '-'}</td>
+                        <td style={{ padding: '0.75rem', textAlign: 'right' }}>{parseFloat(row[sortMetric] || 0).toFixed(4)}</td>
+                        <td style={{ padding: '0.75rem' }}>{row.antigen_source || '-'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<LENSViewer />);
+  </script>
+</body>
+</html>
