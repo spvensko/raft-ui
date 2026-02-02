@@ -8,7 +8,8 @@
   <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-  <script src="https://unpkg.com/lucide-react@0.263.0/dist/umd/lucide-react.min.js"></script>
+  <script src="https://unpkg.com/lucide-react@0.294.0/dist/umd/lucide-react.min.js"></script>
+  <script src="https://unpkg.com/pako@2.1.0/dist/pako.min.js"></script>
   <script>
     window.addEventListener('load', function() {
       setTimeout(function() {
@@ -38,22 +39,12 @@
       <p style="color: #666; font-size: 0.875rem;">If this message persists, check your browser console for errors.</p>
     </div>
   </div>
-  <script type="text/babel" data-presets="react" data-type="module">
-    const lucide = typeof lucideReact !== 'undefined' ? lucideReact : {};
-    const IconFallback = ({ children }) => <span style={{display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '1em', height: '1em'}}>{children || '•'}</span>;
-    const Plus = lucide.Plus || (() => <IconFallback>+</IconFallback>);
-    const Trash2 = lucide.Trash2 || (() => <IconFallback>×</IconFallback>);
-    const Download = lucide.Download || (() => <IconFallback>↓</IconFallback>);
-    const Upload = lucide.Upload || (() => <IconFallback>↑</IconFallback>);
-    const AlertCircle = lucide.AlertCircle || (() => <IconFallback>!</IconFallback>);
-    const Info = lucide.Info || (() => <IconFallback>i</IconFallback>);
-    const Users = lucide.Users || (() => <IconFallback>👥</IconFallback>);
-    const Layers = lucide.Layers || (() => <IconFallback>≡</IconFallback>);
-    const Edit2 = lucide.Edit2 || (() => <IconFallback>✎</IconFallback>);
-    const CheckCircle = lucide.CheckCircle || (() => <IconFallback>✓</IconFallback>);
+  <script type="text/babel" data-presets="react">
     const { useState, useEffect, useCallback } = React;
+    const { Plus, Trash2, Download, Upload, AlertCircle, Info, Users, Layers, Edit2, CheckCircle, Copy } = lucideReact;
 
     const API_BASE = window.location.origin;
+    const IS_LOCAL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 
     const getSessionParams = () => {
       const params = new URLSearchParams(window.location.search);
@@ -210,6 +201,28 @@
         a.href = url; a.download = `${datasetName}.${dateStr}.manifest.tsv`;
         document.body.appendChild(a); a.click(); document.body.removeChild(a);
         URL.revokeObjectURL(url);
+      };
+
+      const copyForCLI = async () => {
+        if (samples.length === 0) { alert('No samples to copy. Please add samples first.'); return; }
+        const tsv = generateTSV();
+        try {
+          // Compress with pako (gzip)
+          const compressed = pako.gzip(tsv);
+          // Base64 encode
+          const base64 = btoa(String.fromCharCode.apply(null, compressed));
+          const encoded = `RAFT1:manifest:${base64}`;
+          await navigator.clipboard.writeText(encoded);
+          alert('Copied! Paste this code into the RAFT CLI.');
+        } catch (error) {
+          console.error('Copy failed:', error);
+          // Fallback: show in a dialog for manual copy
+          const tsv = generateTSV();
+          const compressed = pako.gzip(tsv);
+          const base64 = btoa(String.fromCharCode.apply(null, compressed));
+          const encoded = `RAFT1:manifest:${base64}`;
+          prompt('Copy this code and paste it into the RAFT CLI:', encoded);
+        }
       };
 
       const validateCurrentSample = () => {
@@ -376,10 +389,16 @@
                   <button onClick={downloadManifest} className="px-3 py-2 text-sm bg-gray-600 text-white rounded-md hover:bg-gray-700 transition flex items-center gap-2">
                     <Download size={16} /> Download
                   </button>
-                  <button onClick={saveToRaft} disabled={isSaving || samples.length === 0}
-                    className={`px-3 py-2 text-sm rounded-md transition flex items-center gap-2 ${isSaving || samples.length === 0 ? 'bg-green-400 cursor-not-allowed' : 'bg-green-600 hover:bg-green-700'} text-white`}>
-                    <CheckCircle size={16} /> {isSaving ? 'Saving...' : 'Save to RAFT'}
-                  </button>
+                  {IS_LOCAL ? (
+                    <button onClick={saveToRaft} disabled={isSaving || samples.length === 0}
+                      className={`px-3 py-2 text-sm rounded-md transition flex items-center gap-2 ${isSaving || samples.length === 0 ? 'bg-green-400 cursor-not-allowed' : 'bg-green-600 hover:bg-green-700'} text-white`}>
+                      <CheckCircle size={16} /> {isSaving ? 'Saving...' : 'Save to RAFT'}
+                    </button>
+                  ) : (
+                    <button onClick={copyForCLI} className="px-3 py-2 text-sm bg-green-600 text-white rounded-md hover:bg-green-700 transition flex items-center gap-2">
+                      <Copy size={16} /> Copy for CLI
+                    </button>
+                  )}
                 </div>
               </div>
             </div>

@@ -1,11 +1,11 @@
 <!DOCTYPE html>
-<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>RAFT Workflow Configuration Generator</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/pako@2.1.0/dist/pako.min.js"></script>
     <style>
         .accordion-content {
             max-height: 0;
@@ -180,15 +180,18 @@
                 </div>
                 
                 <div class="config-output-section p-6">
-                    <div class="mb-4 flex gap-2">
-                        <button id="copyConfig" class="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 transition">
+                    <div class="mb-4 flex gap-2 flex-wrap">
+                        <button id="copyConfig" class="bg-gray-600 text-white px-4 py-2 rounded-md hover:bg-gray-700 transition">
                             Copy to Clipboard
                         </button>
                         <button id="downloadConfig" class="bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 transition">
                             Download .config File
                         </button>
-                        <button id="saveToRaft" class="bg-purple-600 text-white px-4 py-2 rounded-md hover:bg-purple-700 transition">
-                            Use Config for RAFT Project
+                        <button id="copyForCLI" class="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 transition hidden">
+                            Copy for CLI
+                        </button>
+                        <button id="saveToRaft" class="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 transition hidden">
+                            Save to RAFT
                         </button>
                     </div>
 
@@ -199,6 +202,9 @@
     </div>
 
     <script>
+        // Detect if running locally (RAFT CLI server) or externally (GitHub Pages)
+        const IS_LOCAL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+
         // Real LENS config data (from uploaded file)
         const LENS_CONFIG_TEXT = `params.dummy_file = "\${params.ref_dir}/dummy_file"
 
@@ -1365,6 +1371,7 @@ params.lens$lenstools_make_lens_report$lens_version = 'lens-v1.8'
         document.getElementById('loadWorkflow').addEventListener('click', loadWorkflowConfig);
         document.getElementById('copyConfig').addEventListener('click', copyConfigToClipboard);
         document.getElementById('downloadConfig').addEventListener('click', downloadConfigFile);
+        document.getElementById('copyForCLI').addEventListener('click', copyForCLI);
         document.getElementById('saveToRaft').addEventListener('click', saveConfigToRaft);
         document.getElementById('copyMethods').addEventListener('click', copyMethodsToClipboard);
         document.getElementById('downloadMethods').addEventListener('click', downloadMethodsFile);
@@ -1373,7 +1380,14 @@ params.lens$lenstools_make_lens_report$lens_version = 'lens-v1.8'
 
         // Initialize form from URL parameters on page load
         initializeFromUrl();
-        
+
+        // Show appropriate button based on local vs external hosting
+        if (IS_LOCAL) {
+            document.getElementById('saveToRaft').classList.remove('hidden');
+        } else {
+            document.getElementById('copyForCLI').classList.remove('hidden');
+        }
+
         // Methods header toggle
         document.getElementById('methodsHeader').addEventListener('click', () => {
             const content = document.querySelector('.methods-output-section');
@@ -3391,7 +3405,39 @@ params.lens$lenstools_make_lens_report$lens_version = 'lens-v1.8'
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
         }
-        
+
+        async function copyForCLI() {
+            const content = document.getElementById('configOutput').value;
+            if (!content.trim()) {
+                alert('No config to copy. Please generate a configuration first.');
+                return;
+            }
+            try {
+                // Compress with pako (gzip)
+                const compressed = pako.gzip(content);
+                // Base64 encode
+                const base64 = btoa(String.fromCharCode.apply(null, compressed));
+                const encoded = `RAFT1:config:${base64}`;
+                await navigator.clipboard.writeText(encoded);
+
+                const button = document.getElementById('copyForCLI');
+                const originalText = button.textContent;
+                button.textContent = 'Copied for CLI!';
+                button.classList.add('bg-green-700');
+                setTimeout(() => {
+                    button.textContent = originalText;
+                    button.classList.remove('bg-green-700');
+                }, 2000);
+            } catch (error) {
+                console.error('Copy failed:', error);
+                // Fallback: show in prompt for manual copy
+                const compressed = pako.gzip(content);
+                const base64 = btoa(String.fromCharCode.apply(null, compressed));
+                const encoded = `RAFT1:config:${base64}`;
+                prompt('Copy this code and paste it into the RAFT CLI:', encoded);
+            }
+        }
+
         function copyMethodsToClipboard() {
             const textarea = document.getElementById('methodsOutput');
             textarea.select();
