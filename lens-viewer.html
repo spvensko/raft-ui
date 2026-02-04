@@ -4,55 +4,94 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LENS Viewer</title>
-  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
-  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-  <script src="https://unpkg.com/lucide-react@0.294.0/dist/umd/lucide-react.min.js"></script>
   <script src="https://unpkg.com/d3@7/dist/d3.min.js"></script>
+  <script src="https://unpkg.com/lucide@0.263.0/dist/umd/lucide.min.js"></script>
   <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+    @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+    .icon { display: inline-flex; align-items: center; justify-content: center; }
+    .icon-spin { animation: spin 1s linear infinite; }
   </style>
 </head>
-<body>
-  <div id="root"></div>
+<body class="bg-gray-50 min-h-screen">
+  <div id="root">
+    <div class="p-8 font-sans">
+      <p>Loading LENS Viewer...</p>
+      <p class="text-gray-500 text-sm">If this message persists, check your browser console for errors.</p>
+    </div>
+  </div>
   <script type="text/babel" data-presets="react">
-    const { useState, useMemo, useEffect, useCallback } = React;
-    const { Upload, ChevronDown, ChevronRight, ChevronLeft, Download, Filter, X, Loader } = lucideReact;
+    const { useState, useMemo, useEffect, useRef } = React;
 
-    const API_BASE = window.location.origin;
-
-    const getUrlParams = () => {
-      const params = new URLSearchParams(window.location.search);
-      return {
-        preload: params.get('preload') || '',
-        projectId: params.get('project_id') || ''
-      };
+    // Icon component using Lucide
+    const Icon = ({ name, size = 24, color = 'currentColor', className = '' }) => {
+      const ref = useRef(null);
+      useEffect(() => {
+        if (ref.current && lucide.icons[name]) {
+          ref.current.innerHTML = '';
+          const svg = lucide.createElement(lucide.icons[name]);
+          svg.setAttribute('width', size);
+          svg.setAttribute('height', size);
+          svg.setAttribute('stroke', color);
+          if (className) svg.setAttribute('class', className);
+          ref.current.appendChild(svg);
+        }
+      }, [name, size, color, className]);
+      return <span ref={ref} className="icon" style={{ width: size, height: size }} />;
     };
 
+    // API base for preloading
+    const API_BASE = window.location.origin;
+    const getUrlParams = () => {
+      const params = new URLSearchParams(window.location.search);
+      return { preload: params.get('preload') || '', projectId: params.get('project_id') || '' };
+    };
+
+    // Priority metrics
+    const priorityMetrics = [
+      { value: 'priority_score_maximum', label: 'Maximum Priority Score' },
+      { value: 'priority_score_mhcflurry', label: 'MHCFlurry Priority Score' },
+      { value: 'priority_score_mhcflurry_no_ccf', label: 'MHCFlurry Priority Score (No CCF)' },
+      { value: 'mhcflurry_2.1.1.aff', label: 'MHCFlurry Binding Affinity' },
+      { value: 'mhcflurry_2.1.1.pres_score', label: 'MHCFlurry Presentation Score' },
+      { value: 'ccf', label: 'Cancer Cell Fraction' },
+      { value: 'vaf', label: 'Variant Allele Frequency' },
+    ];
+
+    const visMetrics = ['priority_score_maximum', 'priority_score_mhcflurry', 'mhcflurry_2.1.1.aff', 'ccf', 'vaf', 'tpm'];
+
+    // Main Component
     const LENSViewer = () => {
       const [patients, setPatients] = useState({});
       const [selectedPatient, setSelectedPatient] = useState(null);
       const [topN, setTopN] = useState(25);
       const [sortMetric, setSortMetric] = useState('priority_score_maximum');
       const [selectedAlleles, setSelectedAlleles] = useState(new Set());
+      const [selectedAntigenSources, setSelectedAntigenSources] = useState(new Set());
+      const [comments, setComments] = useState({});
+      const [showDataTable, setShowDataTable] = useState(false);
+      const [selectedRow, setSelectedRow] = useState(null);
+      const [showAlleleTable, setShowAlleleTable] = useState(true);
+      const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+      const [viewMode, setViewMode] = useState('patient');
+      const [globalFormula, setGlobalFormula] = useState('');
+      const [patientFormulas, setPatientFormulas] = useState({});
+      const [patientTopN, setPatientTopN] = useState({});
+      const [patientSortMetrics, setPatientSortMetrics] = useState({});
       const [isPreloading, setIsPreloading] = useState(false);
       const [preloadError, setPreloadError] = useState('');
 
-      const priorityMetrics = [
-        { value: 'priority_score_maximum', label: 'Maximum Priority Score' },
-        { value: 'priority_score_mhcflurry', label: 'MHCFlurry Priority Score' },
-        { value: 'mhcflurry_2.1.1.aff', label: 'MHCFlurry Binding Affinity' },
-        { value: 'ccf', label: 'Cancer Cell Fraction' },
-        { value: 'vaf', label: 'Variant Allele Frequency' },
-      ];
-
+      // Parse file content
       const parseFileContent = (filename, content, parsedPatients) => {
         const lines = content.split('\n');
         if (lines.length < 2) return parsedPatients;
         const headers = lines[0].split('\t');
         const match = filename.match(/^[^-]+-([^-]+)-ad-/);
-        const patientId = match ? match[1] : filename.split('_')[0];
+        const patientId = match ? match[1] : filename.split('.')[0].split('-')[0] || filename.split('_')[0];
+
         const data = [];
         for (let i = 1; i < lines.length; i++) {
           if (!lines[i].trim()) continue;
@@ -61,18 +100,48 @@
           headers.forEach((header, idx) => { row[header] = values[idx]; });
           data.push(row);
         }
+
         if (!parsedPatients[patientId]) {
-          parsedPatients[patientId] = { id: patientId, files: [], data: [], alleles: new Set() };
+          parsedPatients[patientId] = {
+            id: patientId, files: [], data: [], alleles: new Set(),
+            alleleSupport: {}, antigenSources: new Set()
+          };
         }
+
         parsedPatients[patientId].files.push(filename);
         parsedPatients[patientId].data.push(...data);
-        data.forEach(row => { if (row.allele) parsedPatients[patientId].alleles.add(row.allele); });
+
+        data.forEach(row => {
+          if (row.allele) {
+            parsedPatients[patientId].alleles.add(row.allele);
+            if (!parsedPatients[patientId].alleleSupport[row.allele]) {
+              parsedPatients[patientId].alleleSupport[row.allele] = {};
+            }
+            if (row.hla_allele_support) {
+              row.hla_allele_support.split(';').forEach(support => {
+                const [tool, sampleType] = support.split(':');
+                if (tool && sampleType) {
+                  if (!parsedPatients[patientId].alleleSupport[row.allele][tool]) {
+                    parsedPatients[patientId].alleleSupport[row.allele][tool] = new Set();
+                  }
+                  parsedPatients[patientId].alleleSupport[row.allele][tool].add(sampleType);
+                }
+              });
+            }
+          }
+          if (row.antigen_source) {
+            parsedPatients[patientId].antigenSources.add(row.antigen_source);
+          }
+        });
+
         return parsedPatients;
       };
 
+      // Preload files from server
       useEffect(() => {
         const urlParams = getUrlParams();
         if (!urlParams.preload) return;
+
         const loadFiles = async () => {
           setIsPreloading(true);
           try {
@@ -80,6 +149,7 @@
             if (!listResp.ok) throw new Error('Failed to list files');
             const { files } = await listResp.json();
             if (files.length === 0) { setPreloadError('No TSV files found.'); setIsPreloading(false); return; }
+
             let parsed = {};
             for (const file of files) {
               const contentResp = await fetch(`${API_BASE}/api/file-content?path=${encodeURIComponent(file.path)}`);
@@ -88,19 +158,26 @@
                 parsed = parseFileContent(name, content, parsed);
               }
             }
+
             setPatients({...parsed});
             const firstId = Object.keys(parsed).sort()[0];
-            if (firstId) { setSelectedPatient(firstId); setSelectedAlleles(new Set(parsed[firstId].alleles)); }
+            if (firstId) {
+              setSelectedPatient(firstId);
+              setSelectedAlleles(new Set(parsed[firstId].alleles));
+              setSelectedAntigenSources(new Set(parsed[firstId].antigenSources));
+            }
           } catch (e) { setPreloadError(`Load failed: ${e.message}`); }
           setIsPreloading(false);
         };
         loadFiles();
       }, []);
 
+      // Handle file upload
       const handleFileUpload = (e) => {
         const fileList = Array.from(e.target.files);
         let parsed = {};
         let processed = 0;
+
         fileList.forEach(file => {
           const reader = new FileReader();
           reader.onload = (ev) => {
@@ -109,152 +186,997 @@
             if (processed === fileList.length) {
               setPatients({...parsed});
               const firstId = Object.keys(parsed).sort()[0];
-              if (firstId) { setSelectedPatient(firstId); setSelectedAlleles(new Set(parsed[firstId].alleles)); }
+              if (firstId) {
+                setSelectedPatient(firstId);
+                setSelectedAlleles(new Set(parsed[firstId].alleles));
+                setSelectedAntigenSources(new Set(parsed[firstId].antigenSources));
+              }
             }
           };
           reader.readAsText(file);
         });
       };
 
-      const currentData = useMemo(() => {
+      // Formula evaluation
+      const evaluateFormula = (formula, row, allRows) => {
+        if (!formula || !formula.trim()) return null;
+        try {
+          let expression = formula.trim();
+
+          // Handle bound1() function
+          const bound1Regex = /bound1\(([^)]+)\)/g;
+          expression = expression.replace(bound1Regex, (match, columnName) => {
+            const col = columnName.trim();
+            const values = allRows.map(r => parseFloat(r[col])).filter(v => !isNaN(v) && v > 0);
+            if (values.length === 0) return '0';
+            const maxValue = Math.max(...values);
+            const currentValue = parseFloat(row[col]);
+            if (isNaN(currentValue) || maxValue === 0) return '0';
+            return ((currentValue / maxValue) * 100).toString();
+          });
+
+          // Replace column names
+          const columns = Object.keys(row).sort((a, b) => b.length - a.length);
+          columns.forEach(col => {
+            const value = parseFloat(row[col]);
+            const numValue = isNaN(value) ? 0 : value;
+            const regex = new RegExp(`\\b${col.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g');
+            expression = expression.replace(regex, numValue.toString());
+          });
+
+          expression = expression.replace(/\bmin\b/g, 'Math.min').replace(/\bmax\b/g, 'Math.max');
+          const result = new Function(`return ${expression}`)();
+          return isNaN(result) ? null : result;
+        } catch (error) { return null; }
+      };
+
+      const getActiveFormula = () => patientFormulas[selectedPatient] || globalFormula;
+      const getActiveTopN = () => patientTopN[selectedPatient] !== undefined ? patientTopN[selectedPatient] : topN;
+      const getActiveSortMetric = () => patientSortMetrics[selectedPatient] || sortMetric;
+
+      // Current patient data (filtered and sorted)
+      const currentPatientData = useMemo(() => {
+        if (!selectedPatient || !patients[selectedPatient]) return [];
+        let data = patients[selectedPatient].data;
+
+        if (selectedAlleles.size > 0) {
+          data = data.filter(row => selectedAlleles.has(row.allele));
+        }
+        if (selectedAntigenSources.size > 0) {
+          data = data.filter(row => selectedAntigenSources.has(row.antigen_source));
+        }
+
+        const formula = getActiveFormula();
+        if (formula && formula.trim()) {
+          data = data.map(row => ({ ...row, custom_score: evaluateFormula(formula, row, data) }));
+        }
+
+        const activeSortMetric = (formula && formula.trim()) ? 'custom_score' : getActiveSortMetric();
+        data = [...data].sort((a, b) => (parseFloat(b[activeSortMetric]) || 0) - (parseFloat(a[activeSortMetric]) || 0));
+
+        return data.slice(0, getActiveTopN());
+      }, [selectedPatient, patients, selectedAlleles, selectedAntigenSources, sortMetric, topN, globalFormula, patientFormulas, patientTopN, patientSortMetrics]);
+
+      // Full filtered data (for visualizations)
+      const fullPatientData = useMemo(() => {
         if (!selectedPatient || !patients[selectedPatient]) return [];
         let data = patients[selectedPatient].data;
         if (selectedAlleles.size > 0) data = data.filter(row => selectedAlleles.has(row.allele));
-        data.sort((a, b) => parseFloat(b[sortMetric] || 0) - parseFloat(a[sortMetric] || 0));
-        return data.slice(0, topN);
-      }, [selectedPatient, patients, selectedAlleles, sortMetric, topN]);
+        if (selectedAntigenSources.size > 0) data = data.filter(row => selectedAntigenSources.has(row.antigen_source));
+        const activeSortMetric = getActiveSortMetric();
+        return [...data].sort((a, b) => (parseFloat(b[activeSortMetric]) || 0) - (parseFloat(a[activeSortMetric]) || 0));
+      }, [selectedPatient, patients, selectedAlleles, selectedAntigenSources, sortMetric, patientSortMetrics]);
 
-      const downloadCurrentView = useCallback(() => {
-        if (currentData.length === 0) { alert('No data to export.'); return; }
-        const headers = ['peptide', 'allele', sortMetric, 'antigen_source'];
-        const rows = currentData.map(row => [
-          row.peptide || '',
-          row.allele || '',
-          row[sortMetric] || '',
-          row.antigen_source || ''
-        ]);
-        const tsv = [headers.join('\t'), ...rows.map(r => r.join('\t'))].join('\n');
-        const blob = new Blob([tsv], { type: 'text/tab-separated-values' });
+      // All patients data
+      const allPatientsData = useMemo(() => {
+        const allData = [];
+        Object.values(patients).forEach(patient => {
+          patient.data.forEach(row => { allData.push({ ...row, patientId: patient.id }); });
+        });
+        return allData;
+      }, [patients]);
+
+      const toggleAllele = (allele) => {
+        const newSet = new Set(selectedAlleles);
+        newSet.has(allele) ? newSet.delete(allele) : newSet.add(allele);
+        setSelectedAlleles(newSet);
+      };
+
+      const toggleAntigenSource = (source) => {
+        const newSet = new Set(selectedAntigenSources);
+        newSet.has(source) ? newSet.delete(source) : newSet.add(source);
+        setSelectedAntigenSources(newSet);
+      };
+
+      const generateReport = () => {
+        const reportData = {
+          patients: Object.keys(patients),
+          selectedPatient,
+          topN: getActiveTopN(),
+          sortMetric: getActiveSortMetric(),
+          comments,
+          timestamp: new Date().toISOString(),
+          data: currentPatientData.map(row => ({
+            peptide: row.peptide, allele: row.allele,
+            priority_score: row[getActiveSortMetric()],
+            comment: comments[`${row.peptide}-${row.allele}`] || ''
+          }))
+        };
+        const blob = new Blob([JSON.stringify(reportData, null, 2)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `${selectedPatient}_top${topN}_${sortMetric}.tsv`;
-        document.body.appendChild(a); a.click(); document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-      }, [currentData, selectedPatient, topN, sortMetric]);
+        a.download = `lens_report_${selectedPatient}_${new Date().toISOString().split('T')[0]}.json`;
+        a.click();
+      };
 
-      const downloadAllPatientData = useCallback(() => {
-        if (!selectedPatient || !patients[selectedPatient]) { alert('No patient selected.'); return; }
-        const data = patients[selectedPatient].data;
-        if (data.length === 0) { alert('No data to export.'); return; }
-        const allHeaders = new Set();
-        data.forEach(row => Object.keys(row).forEach(key => allHeaders.add(key)));
-        const headers = Array.from(allHeaders);
-        const rows = data.map(row => headers.map(h => row[h] || ''));
-        const tsv = [headers.join('\t'), ...rows.map(r => r.join('\t'))].join('\n');
-        const blob = new Blob([tsv], { type: 'text/tab-separated-values' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${selectedPatient}_all_data.tsv`;
-        document.body.appendChild(a); a.click(); document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-      }, [selectedPatient, patients]);
-
+      // Upload screen
       if (Object.keys(patients).length === 0) {
         return (
-          <div style={{ minHeight: '100vh', background: '#f8f9fa', padding: '2rem' }}>
-            <div style={{ maxWidth: '800px', margin: '4rem auto', textAlign: 'center', background: '#fff', padding: '3rem', borderRadius: '16px', boxShadow: '0 8px 32px rgba(0,0,0,0.08)' }}>
-              {isPreloading ? (
-                <>
-                  <Loader size={64} style={{ margin: '0 auto 1.5rem', animation: 'spin 1s linear infinite' }} />
-                  <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
-                  <h2 style={{ fontSize: '1.75rem', marginBottom: '1rem' }}>Loading LENS Reports...</h2>
-                </>
-              ) : (
-                <>
-                  {preloadError && <div style={{ background: '#fff5f5', border: '1px solid #feb2b2', padding: '1rem', marginBottom: '1.5rem', color: '#c53030', borderRadius: '8px' }}>{preloadError}</div>}
-                  <Upload size={64} style={{ margin: '0 auto 1.5rem', color: '#495057' }} />
-                  <h2 style={{ fontSize: '1.75rem', marginBottom: '1rem' }}>Upload LENS Reports</h2>
-                  <p style={{ color: '#6c757d', marginBottom: '2rem' }}>Select TSV report files to begin analysis.</p>
-                  <label style={{ display: 'inline-block', padding: '1rem 2.5rem', background: 'linear-gradient(135deg, #ff6b6b 0%, #ee5a6f 100%)', color: '#fff', borderRadius: '8px', cursor: 'pointer', fontSize: '1.1rem', fontWeight: 600 }}>
-                    Choose Files
-                    <input type="file" multiple accept=".tsv,.txt" onChange={handleFileUpload} style={{ display: 'none' }} />
-                  </label>
-                </>
-              )}
+          <div className="min-h-screen bg-gray-50 p-4 md:p-6">
+            <Header />
+            <div className="max-w-3xl mx-auto mt-12">
+              <div className="bg-white rounded-lg shadow-md p-8 text-center border-2 border-dashed border-gray-300">
+                {isPreloading ? (
+                  <>
+                    <div className="mx-auto mb-6 w-16 h-16 flex items-center justify-center">
+                      <Icon name="loader-2" size={48} color="#6b7280" className="animate-spin" />
+                    </div>
+                    <h2 className="text-2xl font-bold text-gray-800 mb-2">Loading LENS Reports...</h2>
+                    <p className="text-gray-500">Please wait while we fetch your data.</p>
+                  </>
+                ) : (
+                  <>
+                    {preloadError && (
+                      <div className="bg-red-50 border border-red-200 rounded-md p-4 mb-6 text-red-700 text-sm">
+                        {preloadError}
+                      </div>
+                    )}
+                    <div className="mx-auto mb-6 w-16 h-16 flex items-center justify-center">
+                      <Icon name="upload" size={48} color="#6b7280" />
+                    </div>
+                    <h2 className="text-2xl font-bold text-gray-800 mb-2">Upload LENS Reports</h2>
+                    <p className="text-gray-600 mb-6 leading-relaxed">
+                      Select one or more TSV report files to begin analysis.<br />
+                      Each file will be parsed and organized by patient identifier.
+                    </p>
+                    <label className="inline-block px-6 py-3 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition cursor-pointer text-sm font-medium">
+                      Choose Files
+                      <input type="file" multiple accept=".tsv,.txt" onChange={handleFileUpload} className="hidden" />
+                    </label>
+                  </>
+                )}
+              </div>
             </div>
           </div>
         );
       }
 
+      // Main interface
       return (
-        <div style={{ minHeight: '100vh', background: '#f8f9fa' }}>
-          <div style={{ background: '#fff', borderBottom: '1px solid #dee2e6', padding: '1rem 2rem' }}>
-            <h1 style={{ fontSize: '1.5rem', fontWeight: 700, color: '#212529' }}>LENS Viewer</h1>
-          </div>
-          <div style={{ display: 'flex', height: 'calc(100vh - 60px)' }}>
-            <div style={{ width: '250px', background: '#fff', borderRight: '1px solid #dee2e6', padding: '1rem', overflow: 'auto' }}>
-              <h3 style={{ fontSize: '0.875rem', fontWeight: 600, marginBottom: '1rem', color: '#495057' }}>Patients</h3>
-              {Object.keys(patients).sort().map(id => (
-                <div key={id} onClick={() => { setSelectedPatient(id); setSelectedAlleles(new Set(patients[id].alleles)); }}
-                  style={{ padding: '0.75rem', marginBottom: '0.5rem', borderRadius: '8px', cursor: 'pointer', background: selectedPatient === id ? '#e7f5ff' : '#f8f9fa', border: selectedPatient === id ? '1px solid #339af0' : '1px solid transparent' }}>
-                  <div style={{ fontWeight: 500 }}>{id}</div>
-                  <div style={{ fontSize: '0.75rem', color: '#868e96' }}>{patients[id].files.length} file(s)</div>
+        <div className="min-h-screen bg-gray-50">
+          <Header />
+          <div className="flex" style={{ height: 'calc(100vh - 80px)' }}>
+            {/* Sidebar */}
+            <Sidebar
+              patients={patients}
+              selectedPatient={selectedPatient}
+              setSelectedPatient={setSelectedPatient}
+              setSelectedAlleles={setSelectedAlleles}
+              setSelectedAntigenSources={setSelectedAntigenSources}
+              sidebarCollapsed={sidebarCollapsed}
+              setSidebarCollapsed={setSidebarCollapsed}
+              viewMode={viewMode}
+              setViewMode={setViewMode}
+            />
+
+            {/* Main Content */}
+            <div className="flex-1 overflow-hidden p-4 md:p-6 flex flex-col">
+              {viewMode === 'global-settings' ? (
+                <div className="overflow-y-auto flex-1">
+                  <GlobalSettings
+                    topN={topN} setTopN={setTopN}
+                    sortMetric={sortMetric} setSortMetric={setSortMetric}
+                    globalFormula={globalFormula} setGlobalFormula={setGlobalFormula}
+                  />
                 </div>
-              ))}
-            </div>
-            <div style={{ flex: 1, padding: '1.5rem', overflow: 'auto' }}>
-              <div style={{ display: 'flex', gap: '1rem', marginBottom: '1.5rem', flexWrap: 'wrap', alignItems: 'flex-end' }}>
-                <div>
-                  <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: 500, marginBottom: '0.5rem' }}>Sort By</label>
-                  <select value={sortMetric} onChange={(e) => setSortMetric(e.target.value)} style={{ padding: '0.5rem', border: '1px solid #dee2e6', borderRadius: '4px' }}>
-                    {priorityMetrics.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
-                  </select>
+              ) : (
+                <div className="flex flex-col flex-1 min-h-0">
+                  {/* Controls at top */}
+                  <div className="flex-shrink-0">
+                    <PatientControls
+                      selectedPatient={selectedPatient}
+                      patients={patients}
+                      topN={topN}
+                      sortMetric={sortMetric}
+                      patientTopN={patientTopN} setPatientTopN={setPatientTopN}
+                      patientSortMetrics={patientSortMetrics} setPatientSortMetrics={setPatientSortMetrics}
+                      patientFormulas={patientFormulas} setPatientFormulas={setPatientFormulas}
+                      globalFormula={globalFormula}
+                      selectedAntigenSources={selectedAntigenSources}
+                      toggleAntigenSource={toggleAntigenSource}
+                      selectedAlleles={selectedAlleles}
+                      toggleAllele={toggleAllele}
+                      showAlleleTable={showAlleleTable} setShowAlleleTable={setShowAlleleTable}
+                      showDataTable={showDataTable} setShowDataTable={setShowDataTable}
+                      generateReport={generateReport}
+                    />
+                  </div>
+
+                  {/* Split panel: Visualizations on left, pMHC cards on right */}
+                  <div className="flex-1 flex gap-4 min-h-0">
+                    {/* Left Panel: Visualizations */}
+                    <div className="w-1/2 flex flex-col min-h-0">
+                      <div className="flex-1 overflow-y-auto pr-2">
+                        <VisualizationPanel
+                          fullPatientData={fullPatientData}
+                          topNData={currentPatientData}
+                          allPatientsData={allPatientsData}
+                          sortMetric={getActiveSortMetric()}
+                          selectedRow={selectedRow}
+                          setSelectedRow={setSelectedRow}
+                          topN={getActiveTopN()}
+                          selectedPatient={selectedPatient}
+                        />
+                      </div>
+                    </div>
+
+                    {/* Right Panel: Data Table + pMHC Cards */}
+                    <div className="w-1/2 flex flex-col min-h-0">
+                      <div className="flex-1 overflow-y-auto pl-2">
+                        {showDataTable && (
+                          <DataTable
+                            data={currentPatientData}
+                            selectedRow={selectedRow}
+                            setSelectedRow={setSelectedRow}
+                            hasCustomFormula={!!(getActiveFormula() && getActiveFormula().trim())}
+                          />
+                        )}
+
+                        <PMHCCards
+                          data={currentPatientData}
+                          sortMetric={getActiveSortMetric()}
+                          comments={comments}
+                          setComments={setComments}
+                          selectedRow={selectedRow}
+                          setSelectedRow={setSelectedRow}
+                          hasCustomFormula={!!(getActiveFormula() && getActiveFormula().trim())}
+                        />
+                      </div>
+                    </div>
+                  </div>
                 </div>
-                <div>
-                  <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: 500, marginBottom: '0.5rem' }}>Top N</label>
-                  <input type="number" value={topN} onChange={(e) => setTopN(parseInt(e.target.value) || 25)} style={{ padding: '0.5rem', border: '1px solid #dee2e6', borderRadius: '4px', width: '80px' }} />
-                </div>
-                <div style={{ marginLeft: 'auto', display: 'flex', gap: '0.5rem' }}>
-                  <button onClick={downloadCurrentView} style={{ padding: '0.5rem 1rem', background: '#228be6', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.875rem' }}>
-                    <Download size={16} /> Export View
-                  </button>
-                  <button onClick={downloadAllPatientData} style={{ padding: '0.5rem 1rem', background: '#495057', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.875rem' }}>
-                    <Download size={16} /> Export All
-                  </button>
-                </div>
-              </div>
-              <div style={{ background: '#fff', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', overflow: 'hidden' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.875rem' }}>
-                  <thead>
-                    <tr style={{ background: '#f8f9fa' }}>
-                      <th style={{ padding: '0.75rem', textAlign: 'left', borderBottom: '1px solid #dee2e6' }}>Peptide</th>
-                      <th style={{ padding: '0.75rem', textAlign: 'left', borderBottom: '1px solid #dee2e6' }}>Allele</th>
-                      <th style={{ padding: '0.75rem', textAlign: 'right', borderBottom: '1px solid #dee2e6' }}>{priorityMetrics.find(m => m.value === sortMetric)?.label || sortMetric}</th>
-                      <th style={{ padding: '0.75rem', textAlign: 'left', borderBottom: '1px solid #dee2e6' }}>Source</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {currentData.map((row, idx) => (
-                      <tr key={idx} style={{ borderBottom: '1px solid #f1f3f4' }}>
-                        <td style={{ padding: '0.75rem', fontFamily: 'monospace' }}>{row.peptide || '-'}</td>
-                        <td style={{ padding: '0.75rem' }}>{row.allele || '-'}</td>
-                        <td style={{ padding: '0.75rem', textAlign: 'right' }}>{parseFloat(row[sortMetric] || 0).toFixed(4)}</td>
-                        <td style={{ padding: '0.75rem' }}>{row.antigen_source || '-'}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              )}
             </div>
           </div>
         </div>
       );
     };
 
-    const root = ReactDOM.createRoot(document.getElementById('root'));
-    root.render(<LENSViewer />);
+    // Header Component
+    const Header = () => (
+      <div className="bg-white border-b border-gray-200 px-4 md:px-6 py-4 shadow-sm">
+        <h1 className="text-2xl md:text-3xl font-bold text-gray-900 mb-1">LENS Visualization and Report Generator</h1>
+        <p className="text-sm text-gray-600">Multi-patient pMHC prioritization and analysis platform</p>
+      </div>
+    );
+
+    // Sidebar Component
+    const Sidebar = ({ patients, selectedPatient, setSelectedPatient, setSelectedAlleles, setSelectedAntigenSources, sidebarCollapsed, setSidebarCollapsed, viewMode, setViewMode }) => (
+      <div className={`${sidebarCollapsed ? 'w-16' : 'w-72'} bg-white border-r border-gray-200 overflow-y-auto overflow-x-hidden shadow-sm transition-all duration-300 relative flex-shrink-0`}>
+        {/* Toggle Button */}
+        <button
+          onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+          className="absolute top-1/2 -right-4 transform -translate-y-1/2 w-8 h-16 rounded-r-lg border-2 border-l-0 border-indigo-500 bg-white cursor-pointer flex items-center justify-center z-50 shadow-md hover:bg-indigo-50 transition text-indigo-600 font-bold text-lg"
+        >
+          {sidebarCollapsed ? '>' : '<'}
+        </button>
+
+        {sidebarCollapsed ? (
+          <div className="py-12 px-2 flex flex-col items-center h-full justify-center">
+            <div className="writing-mode-vertical transform rotate-180 text-sm font-bold text-indigo-600 py-4 tracking-wider" style={{ writingMode: 'vertical-rl' }}>
+              {selectedPatient}
+            </div>
+          </div>
+        ) : (
+          <div className="p-4">
+            {/* Global Settings Button */}
+            <button
+              onClick={() => setViewMode('global-settings')}
+              className={`w-full p-3 mb-4 rounded-md cursor-pointer transition flex items-center gap-2 text-sm font-medium ${
+                viewMode === 'global-settings'
+                  ? 'bg-indigo-600 text-white'
+                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200 border border-gray-200'
+              }`}
+            >
+              <Icon name="settings" size={18} />
+              <span>Global Settings</span>
+            </button>
+
+            {/* Patients */}
+            <h3 className="text-base font-semibold mb-3 text-gray-800 border-b-2 border-indigo-500 pb-2">
+              Patients ({Object.keys(patients).length})
+            </h3>
+            {Object.keys(patients).sort().map(patientId => (
+              <button
+                key={patientId}
+                onClick={() => {
+                  setViewMode('patient');
+                  setSelectedPatient(patientId);
+                  setSelectedAlleles(new Set(patients[patientId].alleles));
+                  setSelectedAntigenSources(new Set(patients[patientId].antigenSources));
+                }}
+                className={`w-full p-3 mb-2 rounded-md cursor-pointer transition text-left ${
+                  selectedPatient === patientId
+                    ? 'bg-indigo-600 text-white'
+                    : 'bg-gray-50 text-gray-700 hover:bg-gray-100 border border-gray-200'
+                }`}
+              >
+                <div className="text-sm font-semibold mb-0.5">{patientId}</div>
+                <div className={`text-xs ${selectedPatient === patientId ? 'text-indigo-200' : 'text-gray-500'}`}>
+                  {patients[patientId].data.length} pMHCs &bull; {patients[patientId].alleles.size} alleles
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+
+    // Global Settings Component
+    const GlobalSettings = ({ topN, setTopN, sortMetric, setSortMetric, globalFormula, setGlobalFormula }) => (
+      <div className="max-w-4xl">
+        <h2 className="text-xl font-bold text-gray-900 mb-4">Global Settings</h2>
+        <div className="bg-white rounded-lg shadow-md p-4 md:p-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Default Top N pMHCs</label>
+              <p className="text-xs text-gray-500 mb-2">Number of top pMHCs to display (can be overridden per patient)</p>
+              <input
+                type="number" value={topN} min="1"
+                onChange={(e) => { const num = parseInt(e.target.value); if (!isNaN(num) && num >= 1) setTopN(num); }}
+                className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Default Sort Metric</label>
+              <p className="text-xs text-gray-500 mb-2">Metric used for sorting and ranking pMHCs</p>
+              <select
+                value={sortMetric} onChange={(e) => setSortMetric(e.target.value)}
+                className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white"
+              >
+                {priorityMetrics.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+              </select>
+            </div>
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-700 mb-1">Custom Prioritization Formula</label>
+            <p className="text-xs text-gray-500 mb-2 leading-relaxed">
+              Define a custom formula using column names and operators (+, -, *, /, min(), max(), bound1()).
+              <br /><code className="bg-gray-100 px-1 py-0.5 rounded text-xs">bound1(priority_score_maximum) * bound1(ccf) + bound1(vaf)</code>
+            </p>
+            <textarea
+              value={globalFormula} onChange={(e) => setGlobalFormula(e.target.value)}
+              placeholder="e.g., priority_score_maximum * ccf + vaf"
+              className="w-full min-h-24 px-3 py-2 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent font-mono resize-y"
+            />
+          </div>
+        </div>
+      </div>
+    );
+
+    // Patient Controls Component
+    const PatientControls = ({
+      selectedPatient, patients, topN, sortMetric,
+      patientTopN, setPatientTopN, patientSortMetrics, setPatientSortMetrics,
+      patientFormulas, setPatientFormulas, globalFormula,
+      selectedAntigenSources, toggleAntigenSource,
+      selectedAlleles, toggleAllele,
+      showAlleleTable, setShowAlleleTable,
+      showDataTable, setShowDataTable, generateReport
+    }) => {
+      const [controlsExpanded, setControlsExpanded] = useState(true);
+
+      if (!selectedPatient || !patients[selectedPatient]) return null;
+      const patient = patients[selectedPatient];
+
+      return (
+        <div className="bg-white rounded-lg shadow-md p-4 md:p-6 mb-4">
+          {/* Collapsible Header */}
+          <div className="flex items-center justify-between mb-4">
+            <button
+              onClick={() => setControlsExpanded(!controlsExpanded)}
+              className="flex items-center gap-2 text-sm font-semibold text-gray-800 hover:text-gray-600 transition cursor-pointer"
+            >
+              <span className={`text-gray-500 transition-transform ${controlsExpanded ? 'rotate-90' : ''}`}>▶</span>
+              Sorting Metric, Antigen Sources, and HLA Alleles
+            </button>
+          </div>
+
+          {controlsExpanded && (
+            <>
+          {/* Patient Overrides */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4 pb-4 border-b border-gray-200">
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Top N (Override)</label>
+              <input
+                type="number"
+                value={patientTopN[selectedPatient] !== undefined ? patientTopN[selectedPatient] : ''}
+                placeholder={`Default: ${topN}`}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (val === '') {
+                    const newPatientTopN = {...patientTopN}; delete newPatientTopN[selectedPatient]; setPatientTopN(newPatientTopN);
+                  } else {
+                    const num = parseInt(val);
+                    if (!isNaN(num) && num >= 1) setPatientTopN({...patientTopN, [selectedPatient]: num});
+                  }
+                }}
+                className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Sort Metric (Override)</label>
+              <select
+                value={patientSortMetrics[selectedPatient] || ''}
+                onChange={(e) => {
+                  if (e.target.value === '') {
+                    const newMetrics = {...patientSortMetrics}; delete newMetrics[selectedPatient]; setPatientSortMetrics(newMetrics);
+                  } else {
+                    setPatientSortMetrics({...patientSortMetrics, [selectedPatient]: e.target.value});
+                  }
+                }}
+                className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white"
+              >
+                <option value="">Use Global: {priorityMetrics.find(m => m.value === sortMetric)?.label}</option>
+                {priorityMetrics.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+              </select>
+            </div>
+          </div>
+
+          {/* Patient Formula */}
+          <div className="mb-4">
+            <label className="block text-xs font-medium text-gray-700 mb-1">Custom Formula (Override)</label>
+            <textarea
+              value={patientFormulas[selectedPatient] || ''}
+              onChange={(e) => setPatientFormulas({...patientFormulas, [selectedPatient]: e.target.value})}
+              placeholder={globalFormula || "e.g., priority_score_maximum * ccf + vaf"}
+              className="w-full min-h-20 px-3 py-2 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent font-mono resize-y"
+            />
+          </div>
+
+          {/* Antigen Sources */}
+          <div className="mb-4">
+            <label className="block text-xs font-medium text-gray-700 mb-2">
+              Antigen Sources ({selectedAntigenSources.size} of {patient.antigenSources.size} selected)
+            </label>
+            <div className="flex flex-wrap gap-2">
+              {Array.from(patient.antigenSources).sort().map(source => {
+                const count = patient.data.filter(row => row.antigen_source === source).length;
+                const isSelected = selectedAntigenSources.has(source);
+                return (
+                  <button
+                    key={source} onClick={() => toggleAntigenSource(source)}
+                    className={`px-3 py-1.5 rounded-full border-2 cursor-pointer text-xs font-semibold transition flex flex-col items-center gap-0.5 ${
+                      isSelected
+                        ? 'border-indigo-600 bg-indigo-600 text-white'
+                        : 'border-gray-300 bg-white text-gray-700 hover:border-indigo-400'
+                    }`}
+                  >
+                    <span>{source}</span>
+                    <span className={`text-xs ${isSelected ? 'text-indigo-200' : 'text-gray-500'}`}>{count} pMHCs</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Allele Selection */}
+          <div className="mb-4">
+            <div className="flex justify-between items-center mb-2">
+              <label className="text-xs font-medium text-gray-700">
+                HLA Alleles ({selectedAlleles.size} of {patient.alleles.size} selected)
+              </label>
+              <button
+                onClick={() => setShowAlleleTable(!showAlleleTable)}
+                className="px-3 py-1 bg-white border border-gray-300 rounded-md cursor-pointer text-xs font-medium text-gray-700 flex items-center gap-1 hover:bg-gray-50 transition"
+              >
+                <Icon name={showAlleleTable ? 'chevron-down' : 'chevron-right'} size={14} />
+                {showAlleleTable ? 'Hide' : 'Show'} Allele Table
+              </button>
+            </div>
+            {showAlleleTable && (
+              <AlleleTable alleles={patient.alleles} alleleSupport={patient.alleleSupport} selectedAlleles={selectedAlleles} toggleAllele={toggleAllele} />
+            )}
+          </div>
+            </>
+          )}
+
+          {/* Action Buttons */}
+          <div className="flex gap-2 flex-wrap">
+            <button
+              onClick={() => setShowDataTable(!showDataTable)}
+              className={`px-4 py-2 rounded-md cursor-pointer text-sm font-medium flex items-center gap-2 transition ${
+                showDataTable
+                  ? 'bg-gray-800 text-white'
+                  : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-50'
+              }`}
+            >
+              <Icon name={showDataTable ? 'chevron-down' : 'chevron-right'} size={16} />
+              {showDataTable ? 'Hide' : 'Show'} Data Table
+            </button>
+            <button
+              onClick={generateReport}
+              className="px-4 py-2 bg-green-600 text-white rounded-md cursor-pointer text-sm font-medium flex items-center gap-2 hover:bg-green-700 transition"
+            >
+              <Icon name="download" size={16} />
+              Export Report
+            </button>
+          </div>
+        </div>
+      );
+    };
+
+    // Allele Table Component
+    const AlleleTable = ({ alleles, alleleSupport, selectedAlleles, toggleAllele }) => {
+      const formatSupport = (support) => {
+        if (!support || Object.keys(support).length === 0) return 'N/A';
+        return Object.entries(support).map(([tool, sampleTypes]) => {
+          const capitalizedTool = tool.toLowerCase() === 'seq2hla' ? 'seq2HLA' : tool.charAt(0).toUpperCase() + tool.slice(1);
+          const formattedTypes = Array.from(sampleTypes).map(t => t.replace(/_/g, ' ').split(' ').map(w => w.toUpperCase() === 'DNA' || w.toUpperCase() === 'RNA' ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1)).join(' ')).join(', ');
+          return `${capitalizedTool} (${formattedTypes})`;
+        }).join(', ');
+      };
+
+      return (
+        <div className="bg-gray-50 rounded-md p-3 max-h-96 overflow-y-auto border border-gray-200">
+          <table className="w-full border-collapse text-sm">
+            <thead>
+              <tr className="border-b-2 border-gray-200">
+                <th className="py-2 px-2 text-left font-semibold text-gray-700 w-14">Select</th>
+                <th className="py-2 px-2 text-left font-semibold text-gray-700 w-36">Allele</th>
+                <th className="py-2 px-2 text-left font-semibold text-gray-700">Allele Support</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Array.from(alleles).sort().map((allele, idx) => (
+                <tr
+                  key={allele}
+                  onClick={() => toggleAllele(allele)}
+                  className={`cursor-pointer hover:bg-gray-100 ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}`}
+                >
+                  <td className="py-2 px-2 text-center">
+                    <input
+                      type="checkbox"
+                      checked={selectedAlleles.has(allele)}
+                      onChange={() => {}}
+                      className="w-4 h-4 cursor-pointer accent-indigo-600"
+                    />
+                  </td>
+                  <td className="py-2 px-2 font-mono font-semibold text-gray-800 text-xs">{allele}</td>
+                  <td className="py-2 px-2 text-gray-500 text-xs">{formatSupport(alleleSupport[allele])}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
+    };
+
+    // Visualization Panel
+    const VisualizationPanel = ({ fullPatientData, topNData, allPatientsData, sortMetric, selectedRow, setSelectedRow, topN, selectedPatient }) => (
+      <div className="bg-white rounded-lg shadow-md p-4 md:p-6 mb-4">
+        <h3 className="text-base font-semibold text-gray-800 mb-4">Distribution Analysis</h3>
+
+        {/* Histograms */}
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
+          {visMetrics.map(metric => (
+            <Histogram key={metric} data={fullPatientData} topNData={topNData} metric={metric} selectedRow={selectedRow} topN={topN} />
+          ))}
+        </div>
+
+        {/* Scatter Matrix */}
+        <h4 className="text-sm font-semibold text-gray-800 mt-6 mb-4">Correlation Matrix</h4>
+        <ScatterMatrix data={fullPatientData} topNData={topNData} metrics={visMetrics.slice(0, 4)} selectedRow={selectedRow} setSelectedRow={setSelectedRow} />
+
+        {/* Box Plots */}
+        {allPatientsData.length > fullPatientData.length && (
+          <>
+            <h4 className="text-sm font-semibold text-gray-800 mt-6 mb-4">Cross-Patient Comparison</h4>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {visMetrics.slice(0, 3).map(metric => (
+                <BoxPlot key={metric} allData={allPatientsData} metric={metric} selectedPatient={selectedPatient} />
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+    );
+
+    // Histogram Component
+    const Histogram = ({ data, topNData, metric, selectedRow, topN }) => {
+      const svgRef = useRef();
+
+      // Transform function for TPM (log2)
+      const transformValue = (v, m) => {
+        const num = parseFloat(v);
+        if (isNaN(num)) return NaN;
+        if (m === 'tpm') return num > 0 ? Math.log2(num) : NaN;
+        return num;
+      };
+
+      useEffect(() => {
+        if (!data.length || !svgRef.current) return;
+        const svg = d3.select(svgRef.current);
+        svg.selectAll('*').remove();
+
+        const width = 320, height = 180;
+        const margin = { top: 20, right: 20, bottom: 40, left: 50 };
+
+        const values = data.map(d => transformValue(d[metric], metric)).filter(v => !isNaN(v));
+        if (values.length === 0) return;
+
+        const topNSet = new Set(topNData.map(d => `${d.peptide}-${d.allele}`));
+        const valueItems = data.map(d => ({ value: transformValue(d[metric], metric), isTopN: topNSet.has(`${d.peptide}-${d.allele}`) })).filter(item => !isNaN(item.value));
+
+        const x = d3.scaleLinear().domain(d3.extent(values)).range([margin.left, width - margin.right]);
+        const bins = d3.bin().domain(x.domain()).thresholds(20)(values);
+
+        const binsWithTopN = bins.map((bin, idx) => {
+          const isLastBin = idx === bins.length - 1;
+          const itemsInBin = valueItems.filter(item => item.value >= bin.x0 && (isLastBin ? item.value <= bin.x1 : item.value < bin.x1));
+          return { x0: bin.x0, x1: bin.x1, length: itemsInBin.length, topNCount: itemsInBin.filter(item => item.isTopN).length };
+        });
+
+        const y = d3.scaleLinear().domain([0, d3.max(bins, d => d.length)]).range([height - margin.bottom, margin.top]);
+        const g = svg.append('g');
+
+        g.selectAll('rect.full').data(binsWithTopN).join('rect').attr('class', 'full')
+          .attr('x', d => x(d.x0) + 1).attr('y', d => y(d.length))
+          .attr('width', d => Math.max(0, x(d.x1) - x(d.x0) - 2)).attr('height', d => y(0) - y(d.length))
+          .attr('fill', '#374151').attr('opacity', 0.6);
+
+        g.selectAll('rect.topn').data(binsWithTopN.filter(d => d.topNCount > 0)).join('rect').attr('class', 'topn')
+          .attr('x', d => x(d.x0) + 1).attr('y', d => y(d.topNCount))
+          .attr('width', d => Math.max(0, x(d.x1) - x(d.x0) - 2)).attr('height', d => y(0) - y(d.topNCount))
+          .attr('fill', '#6366f1').attr('opacity', 0.9);
+
+        if (selectedRow && selectedRow[metric]) {
+          const selectedValue = transformValue(selectedRow[metric], metric);
+          if (!isNaN(selectedValue)) {
+            g.append('line').attr('x1', x(selectedValue)).attr('x2', x(selectedValue))
+              .attr('y1', margin.top).attr('y2', height - margin.bottom)
+              .attr('stroke', '#dc2626').attr('stroke-width', 3).attr('stroke-dasharray', '5,5');
+          }
+        }
+
+        g.append('g').attr('transform', `translate(0,${height - margin.bottom})`).call(d3.axisBottom(x).ticks(5)).style('font-size', '10px');
+        g.append('g').attr('transform', `translate(${margin.left},0)`).call(d3.axisLeft(y).ticks(5)).style('font-size', '10px');
+      }, [data, topNData, metric, selectedRow, topN]);
+
+      const label = metric === 'tpm' ? 'LOG2(TPM)' : metric.includes('mhcflurry_2.1.1.aff') ? 'MHCFLURRY AFFINITY' : metric.includes('mhcflurry_2.1.1.pres') ? 'MHCFLURRY PRESENTATION SCORE' : metric.replace(/_/g, ' ').toUpperCase();
+
+      return (
+        <div className="bg-gray-50 rounded-md p-3 border border-gray-200">
+          <div className="text-xs font-semibold text-gray-700 mb-1">{label}</div>
+          <div className="text-xs text-gray-500 mb-2 flex items-center gap-3">
+            <span className="flex items-center gap-1">
+              <div className="w-3 h-3 bg-indigo-500 rounded-sm opacity-90" /> Top {topN}
+            </span>
+            <span className="flex items-center gap-1">
+              <div className="w-3 h-3 bg-gray-600 rounded-sm opacity-60" /> Full Distribution
+            </span>
+          </div>
+          <svg ref={svgRef} width="320" height="180" />
+        </div>
+      );
+    };
+
+    // Scatter Matrix Component
+    const ScatterMatrix = ({ data, topNData, metrics, selectedRow, setSelectedRow }) => (
+      <div className="bg-gray-50 p-4 rounded-md border border-gray-200">
+        <div className="w-full flex justify-center">
+          <table className="border-collapse">
+            <tbody>
+              {metrics.map((metricY, i) => (
+                <tr key={`row-${i}`}>
+                  {metrics.map((metricX, j) => (
+                    <td key={`cell-${i}-${j}`} style={{ width: '200px', height: '200px' }} className="p-0 bg-white border border-gray-200">
+                      {i === j ? (
+                        <div className="flex items-center justify-center h-full text-xs font-semibold text-gray-700 text-center p-2">
+                          {metricX.includes('mhcflurry_2.1.1.aff') ? 'AFFINITY (nM)' : metricX.includes('mhcflurry_2.1.1.pres') ? 'PRESENTATION SCORE' : metricX.replace(/_/g, ' ').toUpperCase()}
+                        </div>
+                      ) : (
+                        <ScatterPlot data={data} topNData={topNData} metricX={metricX} metricY={metricY} selectedRow={selectedRow} setSelectedRow={setSelectedRow} />
+                      )}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+
+    // Scatter Plot Component
+    const ScatterPlot = ({ data, topNData, metricX, metricY, selectedRow, setSelectedRow }) => {
+      const svgRef = useRef();
+
+      useEffect(() => {
+        if (!data.length || !svgRef.current) return;
+        const svg = d3.select(svgRef.current);
+        svg.selectAll('*').remove();
+
+        const width = 200, height = 200;
+        const margin = { top: 10, right: 10, bottom: 30, left: 40 };
+
+        const points = data.map(d => ({ x: parseFloat(d[metricX]), y: parseFloat(d[metricY]), data: d })).filter(p => !isNaN(p.x) && !isNaN(p.y));
+        if (points.length === 0) return;
+
+        const topNSet = new Set(topNData.filter(d => !isNaN(parseFloat(d[metricX])) && !isNaN(parseFloat(d[metricY]))).map(d => `${d.peptide}-${d.allele}`));
+
+        const x = d3.scaleLinear().domain(d3.extent(points, d => d.x)).range([margin.left, width - margin.right]);
+        const y = d3.scaleLinear().domain(d3.extent(points, d => d.y)).range([height - margin.bottom, margin.top]);
+        const g = svg.append('g');
+
+        const nonTopN = points.filter(p => !topNSet.has(`${p.data.peptide}-${p.data.allele}`));
+        const topNPoints = points.filter(p => topNSet.has(`${p.data.peptide}-${p.data.allele}`));
+
+        g.selectAll('circle.nontop').data(nonTopN).join('circle').attr('class', 'nontop')
+          .attr('cx', d => x(d.x)).attr('cy', d => y(d.y))
+          .attr('r', d => selectedRow && d.data.peptide === selectedRow.peptide && d.data.allele === selectedRow.allele ? 6 : 3)
+          .attr('fill', d => selectedRow && d.data.peptide === selectedRow.peptide && d.data.allele === selectedRow.allele ? '#dc2626' : '#374151')
+          .attr('opacity', 0.3).style('cursor', 'pointer').on('click', (event, d) => setSelectedRow(d.data));
+
+        g.selectAll('circle.topn').data(topNPoints).join('circle').attr('class', 'topn')
+          .attr('cx', d => x(d.x)).attr('cy', d => y(d.y))
+          .attr('r', d => selectedRow && d.data.peptide === selectedRow.peptide && d.data.allele === selectedRow.allele ? 6 : 3.5)
+          .attr('fill', d => selectedRow && d.data.peptide === selectedRow.peptide && d.data.allele === selectedRow.allele ? '#dc2626' : '#6366f1')
+          .attr('opacity', 0.7).style('cursor', 'pointer').on('click', (event, d) => setSelectedRow(d.data));
+
+        g.append('g').attr('transform', `translate(0,${height - margin.bottom})`).call(d3.axisBottom(x).ticks(4)).style('font-size', '9px');
+        g.append('g').attr('transform', `translate(${margin.left},0)`).call(d3.axisLeft(y).ticks(4)).style('font-size', '9px');
+      }, [data, topNData, metricX, metricY, selectedRow, setSelectedRow]);
+
+      return <svg ref={svgRef} width="200" height="200" />;
+    };
+
+    // Box Plot Component
+    const BoxPlot = ({ allData, metric, selectedPatient }) => {
+      const svgRef = useRef();
+      const containerRef = useRef();
+      const [containerWidth, setContainerWidth] = useState(400);
+
+      useEffect(() => {
+        if (containerRef.current) {
+          const resizeObserver = new ResizeObserver(entries => {
+            for (let entry of entries) {
+              setContainerWidth(entry.contentRect.width - 24); // account for padding
+            }
+          });
+          resizeObserver.observe(containerRef.current);
+          return () => resizeObserver.disconnect();
+        }
+      }, []);
+
+      useEffect(() => {
+        if (!allData.length || !svgRef.current) return;
+        const svg = d3.select(svgRef.current);
+        svg.selectAll('*').remove();
+
+        const width = Math.max(400, containerWidth);
+        const height = 200;
+        const margin = { top: 20, right: 20, bottom: 70, left: 50 };
+
+        const byPatient = d3.group(allData, d => d.patientId);
+        let patientStats = Array.from(byPatient, ([patientId, data]) => {
+          const values = data.map(d => parseFloat(d[metric])).filter(v => !isNaN(v)).sort(d3.ascending);
+          if (values.length === 0) return null;
+          return { patientId, q1: d3.quantile(values, 0.25), median: d3.quantile(values, 0.5), q3: d3.quantile(values, 0.75), min: values[0], max: values[values.length - 1], isSelected: patientId === selectedPatient };
+        }).filter(d => d !== null);
+
+        if (patientStats.length === 0) return;
+
+        // Sort by median descending
+        patientStats = patientStats.sort((a, b) => b.median - a.median);
+
+        const x = d3.scaleBand().domain(patientStats.map(d => d.patientId)).range([margin.left, width - margin.right]).padding(0.4);
+        const y = d3.scaleLinear().domain([d3.min(patientStats, d => d.min), d3.max(patientStats, d => d.max)]).range([height - margin.bottom, margin.top]);
+        const g = svg.append('g');
+
+        patientStats.forEach(d => {
+          const xPos = x(d.patientId) + x.bandwidth() / 2;
+          const boxWidth = x.bandwidth() * 0.7;
+          const color = d.isSelected ? '#dc2626' : '#6366f1';
+
+          g.append('line').attr('x1', xPos).attr('x2', xPos).attr('y1', y(d.min)).attr('y2', y(d.q1)).attr('stroke', d.isSelected ? '#dc2626' : '#6b7280').attr('stroke-width', d.isSelected ? 2 : 1);
+          g.append('line').attr('x1', xPos).attr('x2', xPos).attr('y1', y(d.q3)).attr('y2', y(d.max)).attr('stroke', d.isSelected ? '#dc2626' : '#6b7280').attr('stroke-width', d.isSelected ? 2 : 1);
+          g.append('rect').attr('x', xPos - boxWidth / 2).attr('y', y(d.q3)).attr('width', boxWidth).attr('height', y(d.q1) - y(d.q3)).attr('fill', color).attr('opacity', d.isSelected ? 0.9 : 0.7).attr('stroke', d.isSelected ? '#dc2626' : '#6b7280').attr('stroke-width', d.isSelected ? 2 : 1);
+          g.append('line').attr('x1', xPos - boxWidth / 2).attr('x2', xPos + boxWidth / 2).attr('y1', y(d.median)).attr('y2', y(d.median)).attr('stroke', d.isSelected ? '#991b1b' : '#1f2937').attr('stroke-width', d.isSelected ? 3 : 2);
+        });
+
+        g.append('g').attr('transform', `translate(0,${height - margin.bottom})`).call(d3.axisBottom(x)).selectAll('text').attr('transform', 'rotate(-45)').style('text-anchor', 'end').style('font-size', '10px').style('font-weight', d => patientStats.find(p => p.patientId === d)?.isSelected ? 700 : 400).style('fill', d => patientStats.find(p => p.patientId === d)?.isSelected ? '#dc2626' : '#374151');
+        g.append('g').attr('transform', `translate(${margin.left},0)`).call(d3.axisLeft(y).ticks(5)).style('font-size', '10px');
+      }, [allData, metric, selectedPatient, containerWidth]);
+
+      const label = metric === 'tpm' ? 'LOG2(TPM)' : metric.includes('mhcflurry_2.1.1.aff') ? 'MHCFLURRY AFFINITY' : metric.includes('mhcflurry_2.1.1.pres') ? 'MHCFLURRY PRESENTATION SCORE' : metric.replace(/_/g, ' ').toUpperCase();
+
+      return (
+        <div ref={containerRef} className="bg-white rounded-md p-3 border border-gray-200">
+          <div className="text-xs font-semibold text-gray-700 mb-2">{label}</div>
+          <svg ref={svgRef} width={Math.max(400, containerWidth)} height="200" />
+        </div>
+      );
+    };
+
+    // Data Table Component
+    const DataTable = ({ data, selectedRow, setSelectedRow, hasCustomFormula }) => {
+      const [sortColumn, setSortColumn] = useState(null);
+      const [sortDirection, setSortDirection] = useState('desc');
+
+      const sortedData = useMemo(() => {
+        if (!sortColumn) return data;
+        return [...data].sort((a, b) => {
+          const aVal = parseFloat(a[sortColumn]) || 0;
+          const bVal = parseFloat(b[sortColumn]) || 0;
+          return sortDirection === 'asc' ? aVal - bVal : bVal - aVal;
+        });
+      }, [data, sortColumn, sortDirection]);
+
+      const handleSort = (column) => {
+        if (sortColumn === column) setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
+        else { setSortColumn(column); setSortDirection('desc'); }
+      };
+
+      const baseColumns = [
+        { key: 'peptide', label: 'Peptide' }, { key: 'allele', label: 'Allele' },
+        { key: 'priority_score_maximum', label: 'Max Priority Score' },
+        { key: 'mhcflurry_2.1.1.aff', label: 'MHCFlurry Aff' },
+        { key: 'ccf', label: 'CCF' }, { key: 'vaf', label: 'VAF' }, { key: 'tpm', label: 'Log2(TPM)', transform: v => { const num = parseFloat(v); return (!isNaN(num) && num > 0) ? Math.log2(num) : null; } },
+        { key: 'antigen_source', label: 'Source' },
+      ];
+
+      // Add custom score column if formula is active
+      const columns = hasCustomFormula
+        ? [{ key: 'custom_score', label: 'Custom Score' }, ...baseColumns]
+        : baseColumns;
+
+      const formatValue = (col, value) => {
+        if (col.key === 'peptide' || col.key === 'allele' || col.key === 'antigen_source') return value || 'N/A';
+        if (value === null || value === undefined || value === '' || value === 'NA') return 'N/A';
+        // Apply transform if available (e.g., log2 for TPM)
+        const transformedValue = col.transform ? col.transform(value) : parseFloat(value);
+        return (transformedValue === null || isNaN(transformedValue)) ? 'N/A' : transformedValue.toFixed(3);
+      };
+
+      return (
+        <div className="bg-white rounded-lg shadow-md p-4 md:p-6 mb-4 overflow-x-auto">
+          <h3 className="text-base font-semibold text-gray-800 mb-4">Data Table</h3>
+          <table className="w-full border-collapse text-sm">
+            <thead>
+              <tr className="bg-gray-50">
+                {columns.map(col => (
+                  <th
+                    key={col.key}
+                    onClick={() => handleSort(col.key)}
+                    className={`py-3 px-2 text-left font-semibold cursor-pointer border-b-2 whitespace-nowrap hover:bg-gray-100 transition ${
+                      col.key === 'custom_score'
+                        ? 'bg-indigo-100 text-indigo-800 border-indigo-300'
+                        : 'text-gray-700 border-gray-200'
+                    }`}
+                  >
+                    {col.label} {sortColumn === col.key && (sortDirection === 'asc' ? '↑' : '↓')}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {sortedData.map((row, idx) => {
+                const isSelected = selectedRow?.peptide === row.peptide && selectedRow?.allele === row.allele;
+                return (
+                  <tr key={`${row.peptide}-${row.allele}-${idx}`} onClick={() => setSelectedRow(row)} className={`cursor-pointer hover:bg-gray-100 transition ${isSelected ? 'bg-red-50' : idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}`}>
+                    {columns.map(col => (
+                      <td
+                        key={col.key}
+                        className={`py-2 px-2 border-b border-gray-200 ${
+                          col.key === 'peptide' || col.key === 'allele' ? 'font-mono text-xs' : ''
+                        } ${col.key === 'custom_score' ? 'bg-indigo-50 font-semibold text-indigo-800' : ''}`}
+                      >
+                        {formatValue(col, row[col.key])}
+                      </td>
+                    ))}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      );
+    };
+
+    // pMHC Cards Component
+    const PMHCCards = ({ data, sortMetric, comments, setComments, selectedRow, setSelectedRow, hasCustomFormula }) => (
+      <div className="mt-4">
+        <h3 className="text-base font-semibold text-gray-800 mb-4">Top {data.length} pMHCs</h3>
+        <div className="grid gap-3">
+          {data.map((row, idx) => (
+            <PMHCCard key={`${row.peptide}-${row.allele}-${idx}`} row={row} idx={idx} sortMetric={sortMetric} comments={comments} setComments={setComments} isSelected={selectedRow?.peptide === row.peptide && selectedRow?.allele === row.allele} onSelect={() => setSelectedRow(row)} hasCustomFormula={hasCustomFormula} />
+          ))}
+        </div>
+      </div>
+    );
+
+    // pMHC Card Component
+    const PMHCCard = ({ row, idx, sortMetric, comments, setComments, isSelected, onSelect, hasCustomFormula }) => {
+      const key = `${row.peptide}-${row.allele}`;
+      const displayValue = (v) => { if (v === null || v === undefined || v === '' || v === 'NA') return 'N/A'; const num = parseFloat(v); return isNaN(num) ? 'N/A' : num.toFixed(3); };
+
+      return (
+        <div onClick={onSelect} className={`bg-white rounded-lg p-4 cursor-pointer transition shadow-sm hover:shadow-md ${isSelected ? 'border-2 border-indigo-500 bg-indigo-50' : 'border border-gray-200'}`}>
+          <div className="flex justify-between items-start mb-3">
+            <div>
+              <div className="text-lg font-bold text-gray-800 mb-0.5 font-mono">{row.peptide}</div>
+              <div className="text-sm text-gray-500 font-mono">{row.allele} &bull; {row.antigen_source}</div>
+            </div>
+            <div className="bg-indigo-600 text-white px-3 py-1 rounded-full text-sm font-bold">#{idx + 1}</div>
+          </div>
+
+          <div className={`grid gap-3 mb-3 p-3 bg-gray-50 rounded-md ${hasCustomFormula ? 'grid-cols-2 md:grid-cols-4 lg:grid-cols-7' : 'grid-cols-2 md:grid-cols-3 lg:grid-cols-6'}`}>
+            {hasCustomFormula && (
+              <div className="bg-indigo-100 rounded p-2 -m-1">
+                <MetricDisplay label="Custom Score" value={row.custom_score} highlight />
+              </div>
+            )}
+            <MetricDisplay label="Priority Score" value={row[sortMetric]} />
+            <MetricDisplay label="MHCFlurry Binding Aff" value={row['mhcflurry_2.1.1.aff']} />
+            <MetricDisplay label="MHCFlurry Pres Score" value={row['mhcflurry_2.1.1.pres_score']} />
+            <MetricDisplay label="CCF" value={row.ccf} />
+            <MetricDisplay label="VAF" value={row.vaf} />
+            <MetricDisplay label="Log2(TPM)" value={row.tpm} transform={v => { const num = parseFloat(v); return (!isNaN(num) && num > 0) ? Math.log2(num) : null; }} />
+          </div>
+
+          <div>
+            <label className="block mb-1 text-xs font-medium text-gray-700">Comments</label>
+            <textarea
+              value={comments[key] || ''} onChange={(e) => { e.stopPropagation(); setComments({ ...comments, [key]: e.target.value }); }} onClick={(e) => e.stopPropagation()}
+              placeholder="Add your notes about this pMHC..."
+              className="w-full min-h-14 px-3 py-2 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-y"
+            />
+          </div>
+        </div>
+      );
+    };
+
+    // Metric Display Component
+    const MetricDisplay = ({ label, value, highlight, transform }) => {
+      const displayValue = (v) => {
+        if (v === null || v === undefined || v === '' || v === 'NA') return 'N/A';
+        const transformedValue = transform ? transform(v) : parseFloat(v);
+        return (transformedValue === null || isNaN(transformedValue)) ? 'N/A' : transformedValue.toFixed(3);
+      };
+      return (
+        <div>
+          <div className={`text-xs mb-0.5 uppercase tracking-wide ${highlight ? 'text-indigo-700 font-semibold' : 'text-gray-500'}`}>{label}</div>
+          <div className={`text-sm font-semibold ${highlight ? 'text-indigo-900' : 'text-gray-800'}`}>{displayValue(value)}</div>
+        </div>
+      );
+    };
+
+    // Render
+    try {
+      const root = ReactDOM.createRoot(document.getElementById('root'));
+      root.render(<LENSViewer />);
+    } catch (error) {
+      console.error('Failed to render LENS Viewer:', error);
+      document.getElementById('root').innerHTML =
+        '<div class="p-8 font-sans max-w-xl">' +
+        '<h2 class="text-red-600 text-xl font-bold mb-4">Application Error</h2>' +
+        '<p class="mb-2">Failed to initialize the LENS Viewer.</p>' +
+        '<pre class="bg-gray-100 p-4 rounded text-xs overflow-auto">' + error.toString() + '</pre>' +
+        '<p class="mt-4"><a href="javascript:location.reload()" class="text-blue-600 hover:underline">Click here to retry</a></p>' +
+        '</div>';
+    }
   </script>
 </body>
 </html>
