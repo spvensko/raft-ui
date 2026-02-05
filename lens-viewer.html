@@ -47,7 +47,11 @@
     const API_BASE = window.location.origin;
     const getUrlParams = () => {
       const params = new URLSearchParams(window.location.search);
-      return { preload: params.get('preload') || '', projectId: params.get('project_id') || '' };
+      return {
+        preload: params.get('preload') || '',
+        preloadQc: params.get('preload_qc') || '',
+        projectId: params.get('project_id') || ''
+      };
     };
 
     // Priority metrics
@@ -83,15 +87,127 @@
       const [patientSortMetrics, setPatientSortMetrics] = useState({});
       const [isPreloading, setIsPreloading] = useState(false);
       const [preloadError, setPreloadError] = useState('');
+      const [showPasteModal, setShowPasteModal] = useState(false);
+      const [pasteData, setPasteData] = useState('');
+      const [pasteError, setPasteError] = useState('');
+      const [mobileView, setMobileView] = useState('visualizations'); // 'visualizations' or 'pmhcs'
+      const [patientTab, setPatientTab] = useState('pmhc'); // 'pmhc' or 'qc'
+      const [qcData, setQcData] = useState({}); // QC data organized by patient/sample
+      const [cohortQcData, setCohortQcData] = useState(null); // Cohort-level QC summary
+      const [manifestData, setManifestData] = useState(null); // Manifest group data
+      const [selectedGroup, setSelectedGroup] = useState(null); // Current group for multi-group patients
 
-      // Parse file content
-      const parseFileContent = (filename, content, parsedPatients) => {
+      // CRC32 implementation for checksum verification
+      const crc32 = (str) => {
+        const table = (() => {
+          const t = [];
+          for (let i = 0; i < 256; i++) {
+            let c = i;
+            for (let j = 0; j < 8; j++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+            t[i] = c;
+          }
+          return t;
+        })();
+        let crc = 0xFFFFFFFF;
+        for (let i = 0; i < str.length; i++) crc = table[(crc ^ str.charCodeAt(i)) & 0xFF] ^ (crc >>> 8);
+        return (crc ^ 0xFFFFFFFF) >>> 0;
+      };
+
+      // Decode RAFT-encoded data from CLI
+      const decodeRaftData = (encoded) => {
+        const MAGIC = 'RAFT1:';
+        if (!encoded.startsWith(MAGIC)) {
+          throw new Error('Invalid format. Expected RAFT-encoded string starting with RAFT1:');
+        }
+
+        // Extract and verify checksum (last 8 hex chars after final colon)
+        const lastColonIdx = encoded.lastIndexOf(':');
+        const checksumHex = encoded.slice(lastColonIdx + 1);
+        if (!/^[0-9a-f]{8}$/i.test(checksumHex)) {
+          throw new Error('Invalid or missing checksum. Make sure you copied the entire string.');
+        }
+        const dataWithoutChecksum = encoded.slice(0, lastColonIdx);
+        const expectedChecksum = parseInt(checksumHex, 16);
+        const actualChecksum = crc32(dataWithoutChecksum);
+        if (actualChecksum !== expectedChecksum) {
+          throw new Error(`Checksum mismatch! The string may be incomplete or corrupted.\nExpected: ${checksumHex}, Got: ${actualChecksum.toString(16).padStart(8, '0')}\nMake sure you copied the entire string including the checksum at the end.`);
+        }
+
+        const remainder = dataWithoutChecksum.slice(MAGIC.length);
+        const colonIdx = remainder.indexOf(':');
+        if (colonIdx === -1) throw new Error('Invalid format. Missing data type.');
+        const dataType = remainder.slice(0, colonIdx);
+        const base64Data = remainder.slice(colonIdx + 1);
+        if (dataType !== 'lens-data') {
+          throw new Error(`Unexpected data type: ${dataType}. Expected lens-data.`);
+        }
+        // Decode base64 and decompress
+        const binaryStr = atob(base64Data);
+        const bytes = new Uint8Array(binaryStr.length);
+        for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+        // Use DecompressionStream for gzip decompression
+        return new Promise((resolve, reject) => {
+          const ds = new DecompressionStream('gzip');
+          const writer = ds.writable.getWriter();
+          writer.write(bytes);
+          writer.close();
+          new Response(ds.readable).text().then(resolve).catch(reject);
+        });
+      };
+
+      // Handle paste from CLI
+      const handlePasteSubmit = async () => {
+        setPasteError('');
+        try {
+          const cleanData = pasteData.trim();
+          if (!cleanData) {
+            setPasteError('Please paste the code from the CLI.');
+            return;
+          }
+          const jsonStr = await decodeRaftData(cleanData);
+          const files = JSON.parse(jsonStr);
+          let parsed = {};
+          for (const [filename, content] of Object.entries(files)) {
+            parsed = parseFileContent(filename, content, parsed, manifestData);
+          }
+          setPatients({...parsed});
+          const firstId = Object.keys(parsed).sort()[0];
+          if (firstId) {
+            setSelectedPatient(firstId);
+            const patient = parsed[firstId];
+            if (patient.isMultiGroup && patient.groups.length > 0) {
+              setSelectedGroup(patient.groups[0]);
+              const groupData = patient.groupData[patient.groups[0]];
+              setSelectedAlleles(new Set(groupData.alleles));
+              setSelectedAntigenSources(new Set(groupData.antigenSources));
+            } else {
+              setSelectedAlleles(new Set(patient.alleles));
+              setSelectedAntigenSources(new Set(patient.antigenSources));
+            }
+          }
+          setShowPasteModal(false);
+          setPasteData('');
+        } catch (e) {
+          setPasteError(`Failed to decode: ${e.message}`);
+        }
+      };
+
+      // Parse file content with group support
+      const parseFileContent = (filename, content, parsedPatients, manifest = null) => {
         const lines = content.split('\n');
         if (lines.length < 2) return parsedPatients;
         const headers = lines[0].split('\t');
-        const match = filename.match(/^[^-]+-([^-]+)-ad-/);
-        const patientId = match ? match[1] : filename.split('.')[0].split('-')[0] || filename.split('_')[0];
 
+        // Extract patient ID from filename
+        const basename = filename.split('/').pop();
+        const match = basename.match(/^[^-]+-([^-]+)-/);
+        const patientId = match ? match[1] : basename.split('.')[0].split('-')[0] || basename.split('_')[0];
+
+        // Determine which groups this file belongs to
+        const runNames = extractRunNamesFromFilename(filename);
+        const fileGroups = determineFileGroups(runNames, manifest);
+
+        // Parse data rows
         const data = [];
         for (let i = 1; i < lines.length; i++) {
           if (!lines[i].trim()) continue;
@@ -101,40 +217,148 @@
           data.push(row);
         }
 
+        // Check if this patient has multiple groups in manifest
+        const patientManifest = manifest?.patients?.[patientId];
+        const isMultiGroup = patientManifest && patientManifest.groups && patientManifest.groups.length > 1;
+
+        // Initialize patient if not exists
         if (!parsedPatients[patientId]) {
-          parsedPatients[patientId] = {
-            id: patientId, files: [], data: [], alleles: new Set(),
-            alleleSupport: {}, antigenSources: new Set()
-          };
+          if (isMultiGroup) {
+            // Multi-group patient: hierarchical structure
+            parsedPatients[patientId] = {
+              id: patientId,
+              isMultiGroup: true,
+              groups: [...patientManifest.groups],
+              groupData: {},
+              // Also maintain flat data for compatibility
+              files: [],
+              data: [],
+              alleles: new Set(),
+              alleleSupport: {},
+              antigenSources: new Set()
+            };
+            // Initialize each group
+            for (const group of patientManifest.groups) {
+              parsedPatients[patientId].groupData[group] = {
+                files: [],
+                data: [],
+                alleles: new Set(),
+                alleleSupport: {},
+                antigenSources: new Set()
+              };
+            }
+          } else {
+            // Single-group patient: flat structure (backward compatible)
+            parsedPatients[patientId] = {
+              id: patientId,
+              isMultiGroup: false,
+              groups: fileGroups.length > 0 ? fileGroups : ['default'],
+              files: [],
+              data: [],
+              alleles: new Set(),
+              alleleSupport: {},
+              antigenSources: new Set()
+            };
+          }
         }
 
-        parsedPatients[patientId].files.push(filename);
-        parsedPatients[patientId].data.push(...data);
-
-        data.forEach(row => {
-          if (row.allele) {
-            parsedPatients[patientId].alleles.add(row.allele);
-            if (!parsedPatients[patientId].alleleSupport[row.allele]) {
-              parsedPatients[patientId].alleleSupport[row.allele] = {};
-            }
-            if (row.hla_allele_support) {
-              row.hla_allele_support.split(';').forEach(support => {
-                const [tool, sampleType] = support.split(':');
-                if (tool && sampleType) {
-                  if (!parsedPatients[patientId].alleleSupport[row.allele][tool]) {
-                    parsedPatients[patientId].alleleSupport[row.allele][tool] = new Set();
+        // Helper to add data to a group structure
+        const addDataToGroup = (groupData) => {
+          groupData.files.push(filename);
+          groupData.data.push(...data);
+          data.forEach(row => {
+            if (row.allele) {
+              groupData.alleles.add(row.allele);
+              if (!groupData.alleleSupport[row.allele]) {
+                groupData.alleleSupport[row.allele] = {};
+              }
+              if (row.hla_allele_support) {
+                row.hla_allele_support.split(';').forEach(support => {
+                  const [tool, sampleType] = support.split(':');
+                  if (tool && sampleType) {
+                    if (!groupData.alleleSupport[row.allele][tool]) {
+                      groupData.alleleSupport[row.allele][tool] = new Set();
+                    }
+                    groupData.alleleSupport[row.allele][tool].add(sampleType);
                   }
-                  parsedPatients[patientId].alleleSupport[row.allele][tool].add(sampleType);
-                }
-              });
+                });
+              }
+            }
+            if (row.antigen_source) {
+              groupData.antigenSources.add(row.antigen_source);
+            }
+          });
+        };
+
+        // Add data to appropriate groups
+        if (parsedPatients[patientId].isMultiGroup) {
+          // Add to specific groups this file belongs to
+          for (const group of fileGroups) {
+            if (parsedPatients[patientId].groupData[group]) {
+              addDataToGroup(parsedPatients[patientId].groupData[group]);
             }
           }
-          if (row.antigen_source) {
-            parsedPatients[patientId].antigenSources.add(row.antigen_source);
-          }
-        });
+          // Also add to flat structure for overall views
+          addDataToGroup(parsedPatients[patientId]);
+        } else {
+          // Single-group: just add to flat structure
+          addDataToGroup(parsedPatients[patientId]);
+        }
 
         return parsedPatients;
+      };
+
+      // Fetch manifest group data
+      useEffect(() => {
+        const loadManifestData = async () => {
+          try {
+            const resp = await fetch(`${API_BASE}/api/manifest-groups`);
+            if (resp.ok) {
+              const data = await resp.json();
+              if (data && (data.has_multi_group || Object.keys(data.patients || {}).length > 0)) {
+                setManifestData(data);
+              }
+            }
+          } catch (e) {
+            console.warn('No manifest data available:', e);
+          }
+        };
+        loadManifestData();
+      }, []);
+
+      // Extract run names from filename (separated by '+')
+      const extractRunNamesFromFilename = (filename) => {
+        // Remove directory prefix if present (lens/filename.tsv -> filename.tsv)
+        const basename = filename.split('/').pop();
+        // Run names are separated by '+' in the filename
+        // Example: PROJ-PAT001-ad-PAT001-pre+nd-PAT001-normal.lens.tsv
+        const parts = basename.split('+');
+        const runNames = [];
+        for (const part of parts) {
+          // Extract run name pattern: prefix-identifier (e.g., ad-PAT001-pre, nd-PAT001-normal)
+          const match = part.match(/((?:ad|ar|nd|nr)-[^.+]+)/);
+          if (match) {
+            runNames.push(match[1]);
+          }
+        }
+        return runNames;
+      };
+
+      // Determine which groups a file belongs to based on run names
+      const determineFileGroups = (runNames, manifest) => {
+        if (!manifest || !manifest.run_to_groups || runNames.length === 0) {
+          return ['default'];
+        }
+
+        const allGroups = manifest.all_groups || ['default'];
+
+        // A file belongs to a group if ALL its run names are members of that group
+        return allGroups.filter(group =>
+          runNames.every(runName => {
+            const runGroups = manifest.run_to_groups[runName];
+            return runGroups && runGroups.includes(group);
+          })
+        );
       };
 
       // Preload files from server
@@ -145,6 +369,18 @@
         const loadFiles = async () => {
           setIsPreloading(true);
           try {
+            // First fetch manifest data if not already loaded
+            let manifest = manifestData;
+            if (!manifest) {
+              try {
+                const manifestResp = await fetch(`${API_BASE}/api/manifest-groups`);
+                if (manifestResp.ok) {
+                  manifest = await manifestResp.json();
+                  setManifestData(manifest);
+                }
+              } catch (e) { /* ignore */ }
+            }
+
             const listResp = await fetch(`${API_BASE}/api/files?dir=${encodeURIComponent(urlParams.preload)}`);
             if (!listResp.ok) throw new Error('Failed to list files');
             const { files } = await listResp.json();
@@ -155,7 +391,7 @@
               const contentResp = await fetch(`${API_BASE}/api/file-content?path=${encodeURIComponent(file.path)}`);
               if (contentResp.ok) {
                 const { name, content } = await contentResp.json();
-                parsed = parseFileContent(name, content, parsed);
+                parsed = parseFileContent(name, content, parsed, manifest);
               }
             }
 
@@ -163,13 +399,34 @@
             const firstId = Object.keys(parsed).sort()[0];
             if (firstId) {
               setSelectedPatient(firstId);
-              setSelectedAlleles(new Set(parsed[firstId].alleles));
-              setSelectedAntigenSources(new Set(parsed[firstId].antigenSources));
+              const patient = parsed[firstId];
+              // For multi-group patients, auto-select first group
+              if (patient.isMultiGroup && patient.groups.length > 0) {
+                setSelectedGroup(patient.groups[0]);
+                const groupData = patient.groupData[patient.groups[0]];
+                setSelectedAlleles(new Set(groupData.alleles));
+                setSelectedAntigenSources(new Set(groupData.antigenSources));
+              } else {
+                setSelectedAlleles(new Set(patient.alleles));
+                setSelectedAntigenSources(new Set(patient.antigenSources));
+              }
             }
           } catch (e) { setPreloadError(`Load failed: ${e.message}`); }
           setIsPreloading(false);
         };
         loadFiles();
+      }, []);
+
+      // Responsive behavior - auto-collapse sidebar on smaller screens
+      useEffect(() => {
+        const handleResize = () => {
+          if (window.innerWidth < 1024) {
+            setSidebarCollapsed(true);
+          }
+        };
+        handleResize(); // Check on mount
+        window.addEventListener('resize', handleResize);
+        return () => window.removeEventListener('resize', handleResize);
       }, []);
 
       // Handle file upload
@@ -181,15 +438,23 @@
         fileList.forEach(file => {
           const reader = new FileReader();
           reader.onload = (ev) => {
-            parsed = parseFileContent(file.name, ev.target.result, parsed);
+            parsed = parseFileContent(file.name, ev.target.result, parsed, manifestData);
             processed++;
             if (processed === fileList.length) {
               setPatients({...parsed});
               const firstId = Object.keys(parsed).sort()[0];
               if (firstId) {
                 setSelectedPatient(firstId);
-                setSelectedAlleles(new Set(parsed[firstId].alleles));
-                setSelectedAntigenSources(new Set(parsed[firstId].antigenSources));
+                const patient = parsed[firstId];
+                if (patient.isMultiGroup && patient.groups.length > 0) {
+                  setSelectedGroup(patient.groups[0]);
+                  const groupData = patient.groupData[patient.groups[0]];
+                  setSelectedAlleles(new Set(groupData.alleles));
+                  setSelectedAntigenSources(new Set(groupData.antigenSources));
+                } else {
+                  setSelectedAlleles(new Set(patient.alleles));
+                  setSelectedAntigenSources(new Set(patient.antigenSources));
+                }
               }
             }
           };
@@ -234,10 +499,22 @@
       const getActiveTopN = () => patientTopN[selectedPatient] !== undefined ? patientTopN[selectedPatient] : topN;
       const getActiveSortMetric = () => patientSortMetrics[selectedPatient] || sortMetric;
 
+      // Get the data source for current patient (group-aware)
+      const getPatientDataSource = () => {
+        if (!selectedPatient || !patients[selectedPatient]) return [];
+        const patient = patients[selectedPatient];
+        // For multi-group patients, use group-specific data (unless showing joint analysis)
+        if (patient.isMultiGroup && selectedGroup && selectedGroup !== 'joint' && patient.groupData[selectedGroup]) {
+          return patient.groupData[selectedGroup].data;
+        }
+        // For single-group or joint analysis, use all data
+        return patient.data;
+      };
+
       // Current patient data (filtered and sorted)
       const currentPatientData = useMemo(() => {
-        if (!selectedPatient || !patients[selectedPatient]) return [];
-        let data = patients[selectedPatient].data;
+        let data = getPatientDataSource();
+        if (data.length === 0) return [];
 
         if (selectedAlleles.size > 0) {
           data = data.filter(row => selectedAlleles.has(row.allele));
@@ -255,17 +532,17 @@
         data = [...data].sort((a, b) => (parseFloat(b[activeSortMetric]) || 0) - (parseFloat(a[activeSortMetric]) || 0));
 
         return data.slice(0, getActiveTopN());
-      }, [selectedPatient, patients, selectedAlleles, selectedAntigenSources, sortMetric, topN, globalFormula, patientFormulas, patientTopN, patientSortMetrics]);
+      }, [selectedPatient, patients, selectedGroup, selectedAlleles, selectedAntigenSources, sortMetric, topN, globalFormula, patientFormulas, patientTopN, patientSortMetrics]);
 
       // Full filtered data (for visualizations)
       const fullPatientData = useMemo(() => {
-        if (!selectedPatient || !patients[selectedPatient]) return [];
-        let data = patients[selectedPatient].data;
+        let data = getPatientDataSource();
+        if (data.length === 0) return [];
         if (selectedAlleles.size > 0) data = data.filter(row => selectedAlleles.has(row.allele));
         if (selectedAntigenSources.size > 0) data = data.filter(row => selectedAntigenSources.has(row.antigen_source));
         const activeSortMetric = getActiveSortMetric();
         return [...data].sort((a, b) => (parseFloat(b[activeSortMetric]) || 0) - (parseFloat(a[activeSortMetric]) || 0));
-      }, [selectedPatient, patients, selectedAlleles, selectedAntigenSources, sortMetric, patientSortMetrics]);
+      }, [selectedPatient, patients, selectedGroup, selectedAlleles, selectedAntigenSources, sortMetric, patientSortMetrics]);
 
       // All patients data
       const allPatientsData = useMemo(() => {
@@ -340,14 +617,70 @@
                       Select one or more TSV report files to begin analysis.<br />
                       Each file will be parsed and organized by patient identifier.
                     </p>
-                    <label className="inline-block px-6 py-3 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition cursor-pointer text-sm font-medium">
-                      Choose Files
-                      <input type="file" multiple accept=".tsv,.txt" onChange={handleFileUpload} className="hidden" />
-                    </label>
+                    <div className="flex gap-4 justify-center flex-wrap">
+                      <label className="inline-block px-6 py-3 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition cursor-pointer text-sm font-medium">
+                        Choose Files
+                        <input type="file" multiple accept=".tsv,.txt" onChange={handleFileUpload} className="hidden" />
+                      </label>
+                      <button
+                        onClick={() => setShowPasteModal(true)}
+                        className="px-6 py-3 bg-gray-700 text-white rounded-md hover:bg-gray-800 transition cursor-pointer text-sm font-medium flex items-center gap-2"
+                      >
+                        <Icon name="clipboard-paste" size={18} />
+                        Paste from CLI
+                      </button>
+                    </div>
+                    <p className="text-gray-500 text-xs mt-4">
+                      Running in headless mode? Use "Paste from CLI" to load data from RAFT.
+                    </p>
                   </>
                 )}
               </div>
             </div>
+
+            {/* Paste Modal */}
+            {showPasteModal && (
+              <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+                <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full p-6">
+                  <div className="flex justify-between items-center mb-4">
+                    <h3 className="text-lg font-semibold text-gray-800">Paste Data from CLI</h3>
+                    <button onClick={() => { setShowPasteModal(false); setPasteError(''); setPasteData(''); }} className="text-gray-500 hover:text-gray-700 cursor-pointer">
+                      <Icon name="x" size={24} />
+                    </button>
+                  </div>
+                  <p className="text-sm text-gray-600 mb-4">
+                    Paste the encoded data string from the RAFT CLI output below.
+                    The string starts with <code className="bg-gray-100 px-1 rounded">RAFT1:lens-data:</code> and ends with a checksum.
+                    <br /><span className="text-gray-500">Make sure to copy the entire string including the final 8-character checksum.</span>
+                  </p>
+                  {pasteError && (
+                    <div className="bg-red-50 border border-red-200 rounded-md p-3 mb-4 text-red-700 text-sm">
+                      {pasteError}
+                    </div>
+                  )}
+                  <textarea
+                    value={pasteData}
+                    onChange={(e) => setPasteData(e.target.value)}
+                    placeholder="Paste RAFT1:lens-data:... here"
+                    className="w-full h-40 px-3 py-2 border border-gray-300 rounded-md font-mono text-xs focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
+                  />
+                  <div className="flex justify-end gap-3 mt-4">
+                    <button
+                      onClick={() => { setShowPasteModal(false); setPasteError(''); setPasteData(''); }}
+                      className="px-4 py-2 text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50 transition cursor-pointer text-sm font-medium"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={handlePasteSubmit}
+                      className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition cursor-pointer text-sm font-medium"
+                    >
+                      Load Data
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         );
       }
@@ -368,6 +701,9 @@
               setSidebarCollapsed={setSidebarCollapsed}
               viewMode={viewMode}
               setViewMode={setViewMode}
+              qcData={qcData}
+              selectedGroup={selectedGroup}
+              setSelectedGroup={setSelectedGroup}
             />
 
             {/* Main Content */}
@@ -380,8 +716,33 @@
                     globalFormula={globalFormula} setGlobalFormula={setGlobalFormula}
                   />
                 </div>
+              ) : viewMode === 'cohort-qc' ? (
+                <div className="overflow-y-auto flex-1">
+                  <CohortQCView qcData={qcData} cohortQcData={cohortQcData} patients={patients} manifestData={manifestData} />
+                </div>
+              ) : selectedGroup === 'joint' && patients[selectedPatient]?.isMultiGroup ? (
+                /* Joint Analysis View for multi-group patients */
+                <div className="flex flex-col flex-1 min-h-0 overflow-y-auto">
+                  <JointAnalysisPanel
+                    patient={patients[selectedPatient]}
+                    qcData={qcData[selectedPatient]}
+                  />
+                </div>
               ) : (
                 <div className="flex flex-col flex-1 min-h-0">
+                  {/* Group header for multi-group patients */}
+                  {patients[selectedPatient]?.isMultiGroup && selectedGroup && selectedGroup !== 'joint' && (
+                    <div className="flex-shrink-0 mb-3 px-4 py-2 bg-purple-50 border border-purple-200 rounded-lg flex items-center gap-2">
+                      <Icon name="folder" size={18} className="text-purple-600" />
+                      <span className="text-sm font-medium text-purple-800">
+                        Viewing group: <strong>{selectedGroup}</strong>
+                      </span>
+                      <span className="text-xs text-purple-600 ml-2">
+                        ({patients[selectedPatient].groupData[selectedGroup]?.data.length || 0} pMHCs)
+                      </span>
+                    </div>
+                  )}
+
                   {/* Controls at top */}
                   <div className="flex-shrink-0">
                     <PatientControls
@@ -400,14 +761,64 @@
                       showAlleleTable={showAlleleTable} setShowAlleleTable={setShowAlleleTable}
                       showDataTable={showDataTable} setShowDataTable={setShowDataTable}
                       generateReport={generateReport}
+                      selectedGroup={selectedGroup}
                     />
                   </div>
 
-                  {/* Split panel: Visualizations on left, pMHC cards on right */}
-                  <div className="flex-1 flex gap-4 min-h-0">
+                  {/* Patient-level tabs: pMHC vs QC */}
+                  <div className="flex-shrink-0 mb-4">
+                    <div className="flex border-b border-gray-200">
+                      <button
+                        onClick={() => setPatientTab('pmhc')}
+                        className={`px-6 py-2 text-sm font-medium transition border-b-2 ${
+                          patientTab === 'pmhc'
+                            ? 'text-indigo-600 border-indigo-600'
+                            : 'text-gray-500 border-transparent hover:text-gray-700'
+                        }`}
+                      >
+                        pMHC Analysis
+                      </button>
+                      <button
+                        onClick={() => setPatientTab('qc')}
+                        className={`px-6 py-2 text-sm font-medium transition border-b-2 flex items-center gap-2 ${
+                          patientTab === 'qc'
+                            ? 'text-emerald-600 border-emerald-600'
+                            : 'text-gray-500 border-transparent hover:text-gray-700'
+                        }`}
+                      >
+                        Quality Control
+                        {qcData[selectedPatient] && (
+                          <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">
+                            {Object.keys(qcData[selectedPatient] || {}).length}
+                          </span>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  {patientTab === 'pmhc' ? (
+                  /* Split panel: Visualizations on left, pMHC cards on right */
+                  /* On small screens: tabs to switch views. On large screens: side-by-side */
+                  <div className="flex-1 flex flex-col lg:flex-row gap-4 min-h-0">
+                    {/* Mobile/Tablet: View toggle tabs */}
+                    <div className="lg:hidden flex border-b border-gray-200 mb-2">
+                      <button
+                        onClick={() => setMobileView('visualizations')}
+                        className={`flex-1 py-2 text-sm font-medium transition ${mobileView === 'visualizations' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500'}`}
+                      >
+                        Visualizations
+                      </button>
+                      <button
+                        onClick={() => setMobileView('pmhcs')}
+                        className={`flex-1 py-2 text-sm font-medium transition ${mobileView === 'pmhcs' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500'}`}
+                      >
+                        Top pMHCs
+                      </button>
+                    </div>
+
                     {/* Left Panel: Visualizations */}
-                    <div className="w-1/2 flex flex-col min-h-0">
-                      <div className="flex-1 overflow-y-auto pr-2">
+                    <div className={`lg:w-1/2 flex flex-col min-h-0 ${mobileView !== 'visualizations' ? 'hidden lg:flex' : ''}`}>
+                      <div className="flex-1 overflow-y-auto lg:pr-2">
                         <VisualizationPanel
                           fullPatientData={fullPatientData}
                           topNData={currentPatientData}
@@ -422,8 +833,8 @@
                     </div>
 
                     {/* Right Panel: Data Table + pMHC Cards */}
-                    <div className="w-1/2 flex flex-col min-h-0">
-                      <div className="flex-1 overflow-y-auto pl-2">
+                    <div className={`lg:w-1/2 flex flex-col min-h-0 ${mobileView !== 'pmhcs' ? 'hidden lg:flex' : ''}`}>
+                      <div className="flex-1 overflow-y-auto lg:pl-2">
                         {showDataTable && (
                           <DataTable
                             data={currentPatientData}
@@ -445,6 +856,16 @@
                       </div>
                     </div>
                   </div>
+                  ) : (
+                  /* QC Tab Content */
+                  <div className="flex-1 overflow-y-auto">
+                    <PatientQCView
+                      patient={selectedPatient}
+                      qcData={qcData[selectedPatient]}
+                      cohortQcData={cohortQcData}
+                    />
+                  </div>
+                  )}
                 </div>
               )}
             </div>
@@ -462,7 +883,41 @@
     );
 
     // Sidebar Component
-    const Sidebar = ({ patients, selectedPatient, setSelectedPatient, setSelectedAlleles, setSelectedAntigenSources, sidebarCollapsed, setSidebarCollapsed, viewMode, setViewMode }) => (
+    const Sidebar = ({ patients, selectedPatient, setSelectedPatient, setSelectedAlleles, setSelectedAntigenSources, sidebarCollapsed, setSidebarCollapsed, viewMode, setViewMode, qcData, selectedGroup, setSelectedGroup }) => {
+      const handlePatientClick = (patientId) => {
+        setViewMode('patient');
+        setSelectedPatient(patientId);
+        const patient = patients[patientId];
+        if (patient.isMultiGroup && patient.groups.length > 0) {
+          // Auto-select first group for multi-group patients
+          setSelectedGroup(patient.groups[0]);
+          const groupData = patient.groupData[patient.groups[0]];
+          setSelectedAlleles(new Set(groupData.alleles));
+          setSelectedAntigenSources(new Set(groupData.antigenSources));
+        } else {
+          setSelectedGroup(null);
+          setSelectedAlleles(new Set(patient.alleles));
+          setSelectedAntigenSources(new Set(patient.antigenSources));
+        }
+      };
+
+      const handleGroupClick = (patientId, group) => {
+        setViewMode('patient');
+        setSelectedPatient(patientId);
+        setSelectedGroup(group);
+        const patient = patients[patientId];
+        if (group === 'joint') {
+          // Joint analysis uses all data
+          setSelectedAlleles(new Set(patient.alleles));
+          setSelectedAntigenSources(new Set(patient.antigenSources));
+        } else if (patient.groupData && patient.groupData[group]) {
+          const groupData = patient.groupData[group];
+          setSelectedAlleles(new Set(groupData.alleles));
+          setSelectedAntigenSources(new Set(groupData.antigenSources));
+        }
+      };
+
+      return (
       <div className={`${sidebarCollapsed ? 'w-16' : 'w-72'} bg-white border-r border-gray-200 overflow-y-auto overflow-x-hidden shadow-sm transition-all duration-300 relative flex-shrink-0`}>
         {/* Toggle Button */}
         <button
@@ -475,7 +930,7 @@
         {sidebarCollapsed ? (
           <div className="py-12 px-2 flex flex-col items-center h-full justify-center">
             <div className="writing-mode-vertical transform rotate-180 text-sm font-bold text-indigo-600 py-4 tracking-wider" style={{ writingMode: 'vertical-rl' }}>
-              {selectedPatient}
+              {selectedPatient}{selectedGroup && selectedGroup !== 'joint' ? ` (${selectedGroup})` : ''}
             </div>
           </div>
         ) : (
@@ -483,7 +938,7 @@
             {/* Global Settings Button */}
             <button
               onClick={() => setViewMode('global-settings')}
-              className={`w-full p-3 mb-4 rounded-md cursor-pointer transition flex items-center gap-2 text-sm font-medium ${
+              className={`w-full p-3 mb-2 rounded-md cursor-pointer transition flex items-center gap-2 text-sm font-medium ${
                 viewMode === 'global-settings'
                   ? 'bg-indigo-600 text-white'
                   : 'bg-gray-100 text-gray-700 hover:bg-gray-200 border border-gray-200'
@@ -493,35 +948,95 @@
               <span>Global Settings</span>
             </button>
 
+            {/* Cohort QC Button */}
+            <button
+              onClick={() => setViewMode('cohort-qc')}
+              className={`w-full p-3 mb-4 rounded-md cursor-pointer transition flex items-center gap-2 text-sm font-medium ${
+                viewMode === 'cohort-qc'
+                  ? 'bg-emerald-600 text-white'
+                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200 border border-gray-200'
+              }`}
+            >
+              <Icon name="clipboard-check" size={18} />
+              <span>Cohort QC</span>
+              {Object.keys(qcData).length > 0 && (
+                <span className={`ml-auto text-xs px-2 py-0.5 rounded-full ${viewMode === 'cohort-qc' ? 'bg-emerald-500' : 'bg-emerald-100 text-emerald-700'}`}>
+                  {Object.keys(qcData).length}
+                </span>
+              )}
+            </button>
+
             {/* Patients */}
             <h3 className="text-base font-semibold mb-3 text-gray-800 border-b-2 border-indigo-500 pb-2">
               Patients ({Object.keys(patients).length})
             </h3>
-            {Object.keys(patients).sort().map(patientId => (
-              <button
-                key={patientId}
-                onClick={() => {
-                  setViewMode('patient');
-                  setSelectedPatient(patientId);
-                  setSelectedAlleles(new Set(patients[patientId].alleles));
-                  setSelectedAntigenSources(new Set(patients[patientId].antigenSources));
-                }}
-                className={`w-full p-3 mb-2 rounded-md cursor-pointer transition text-left ${
-                  selectedPatient === patientId
-                    ? 'bg-indigo-600 text-white'
-                    : 'bg-gray-50 text-gray-700 hover:bg-gray-100 border border-gray-200'
-                }`}
-              >
-                <div className="text-sm font-semibold mb-0.5">{patientId}</div>
-                <div className={`text-xs ${selectedPatient === patientId ? 'text-indigo-200' : 'text-gray-500'}`}>
-                  {patients[patientId].data.length} pMHCs &bull; {patients[patientId].alleles.size} alleles
+            {Object.keys(patients).sort().map(patientId => {
+              const patient = patients[patientId];
+              const isSelected = selectedPatient === patientId && viewMode === 'patient';
+              return (
+                <div key={patientId} className="mb-2">
+                  <button
+                    onClick={() => handlePatientClick(patientId)}
+                    className={`w-full p-3 rounded-md cursor-pointer transition text-left ${
+                      isSelected
+                        ? 'bg-indigo-600 text-white'
+                        : 'bg-gray-50 text-gray-700 hover:bg-gray-100 border border-gray-200'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="text-sm font-semibold mb-0.5">{patientId}</div>
+                      {patient.isMultiGroup && (
+                        <span className={`text-xs px-1.5 py-0.5 rounded ${isSelected ? 'bg-indigo-500' : 'bg-purple-100 text-purple-700'}`}>
+                          {patient.groups.length} groups
+                        </span>
+                      )}
+                    </div>
+                    <div className={`text-xs ${isSelected ? 'text-indigo-200' : 'text-gray-500'}`}>
+                      {patient.data.length} pMHCs &bull; {patient.alleles.size} alleles
+                    </div>
+                  </button>
+
+                  {/* Group sub-navigation for multi-group patients */}
+                  {isSelected && patient.isMultiGroup && (
+                    <div className="ml-3 mt-1 space-y-1 border-l-2 border-indigo-300 pl-2">
+                      {patient.groups.map(group => (
+                        <button
+                          key={group}
+                          onClick={() => handleGroupClick(patientId, group)}
+                          className={`w-full p-2 text-left text-sm rounded transition ${
+                            selectedGroup === group
+                              ? 'bg-indigo-100 text-indigo-700 font-medium'
+                              : 'text-gray-600 hover:bg-gray-100'
+                          }`}
+                        >
+                          <Icon name="folder" size={14} className="inline mr-1" />
+                          {group}
+                          <span className="text-xs text-gray-400 ml-1">
+                            ({patient.groupData[group]?.data.length || 0})
+                          </span>
+                        </button>
+                      ))}
+                      <button
+                        onClick={() => handleGroupClick(patientId, 'joint')}
+                        className={`w-full p-2 text-left text-sm rounded transition ${
+                          selectedGroup === 'joint'
+                            ? 'bg-purple-100 text-purple-700 font-medium'
+                            : 'text-gray-600 hover:bg-gray-100'
+                        }`}
+                      >
+                        <Icon name="git-compare" size={14} className="inline mr-1" />
+                        Joint Analysis
+                      </button>
+                    </div>
+                  )}
                 </div>
-              </button>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
     );
+    };
 
     // Global Settings Component
     const GlobalSettings = ({ topN, setTopN, sortMetric, setSortMetric, globalFormula, setGlobalFormula }) => (
@@ -795,6 +1310,7 @@
 
     // Histogram Component
     const Histogram = ({ data, topNData, metric, selectedRow, topN }) => {
+      const containerRef = useRef();
       const svgRef = useRef();
 
       // Transform function for TPM (log2)
@@ -806,12 +1322,18 @@
       };
 
       useEffect(() => {
-        if (!data.length || !svgRef.current) return;
+        if (!data.length || !svgRef.current || !containerRef.current) return;
         const svg = d3.select(svgRef.current);
         svg.selectAll('*').remove();
 
-        const width = 320, height = 180;
+        // Responsive width based on container
+        const containerWidth = containerRef.current.clientWidth || 320;
+        const width = Math.max(200, Math.min(containerWidth - 24, 400)); // Account for padding
+        const height = Math.round(width * 0.56); // 16:9 aspect ratio
         const margin = { top: 20, right: 20, bottom: 40, left: 50 };
+
+        // Set SVG dimensions
+        svg.attr('width', width).attr('height', height);
 
         const values = data.map(d => transformValue(d[metric], metric)).filter(v => !isNaN(v));
         if (values.length === 0) return;
@@ -857,7 +1379,7 @@
       const label = metric === 'tpm' ? 'LOG2(TPM)' : metric.includes('mhcflurry_2.1.1.aff') ? 'MHCFLURRY AFFINITY' : metric.includes('mhcflurry_2.1.1.pres') ? 'MHCFLURRY PRESENTATION SCORE' : metric.replace(/_/g, ' ').toUpperCase();
 
       return (
-        <div className="bg-gray-50 rounded-md p-3 border border-gray-200">
+        <div ref={containerRef} className="bg-gray-50 rounded-md p-3 border border-gray-200">
           <div className="text-xs font-semibold text-gray-700 mb-1">{label}</div>
           <div className="text-xs text-gray-500 mb-2 flex items-center gap-3">
             <span className="flex items-center gap-1">
@@ -867,21 +1389,21 @@
               <div className="w-3 h-3 bg-gray-600 rounded-sm opacity-60" /> Full Distribution
             </span>
           </div>
-          <svg ref={svgRef} width="320" height="180" />
+          <svg ref={svgRef} className="w-full" style={{ maxWidth: '400px', height: 'auto', aspectRatio: '16/9' }} />
         </div>
       );
     };
 
     // Scatter Matrix Component
     const ScatterMatrix = ({ data, topNData, metrics, selectedRow, setSelectedRow }) => (
-      <div className="bg-gray-50 p-4 rounded-md border border-gray-200">
-        <div className="w-full flex justify-center">
+      <div className="bg-gray-50 p-4 rounded-md border border-gray-200 overflow-x-auto">
+        <div className="flex justify-center min-w-fit">
           <table className="border-collapse">
             <tbody>
               {metrics.map((metricY, i) => (
                 <tr key={`row-${i}`}>
                   {metrics.map((metricX, j) => (
-                    <td key={`cell-${i}-${j}`} style={{ width: '200px', height: '200px' }} className="p-0 bg-white border border-gray-200">
+                    <td key={`cell-${i}-${j}`} className="p-0 bg-white border border-gray-200" style={{ width: 'clamp(120px, 15vw, 200px)', height: 'clamp(120px, 15vw, 200px)' }}>
                       {i === j ? (
                         <div className="flex items-center justify-center h-full text-xs font-semibold text-gray-700 text-center p-2">
                           {metricX.includes('mhcflurry_2.1.1.aff') ? 'AFFINITY (nM)' : metricX.includes('mhcflurry_2.1.1.pres') ? 'PRESENTATION SCORE' : metricX.replace(/_/g, ' ').toUpperCase()}
@@ -908,7 +1430,11 @@
         const svg = d3.select(svgRef.current);
         svg.selectAll('*').remove();
 
-        const width = 200, height = 200;
+        // Get actual dimensions from the SVG element
+        const rect = svgRef.current.getBoundingClientRect();
+        const width = Math.max(120, rect.width || 200);
+        const height = Math.max(120, rect.height || 200);
+        svg.attr('width', width).attr('height', height);
         const margin = { top: 10, right: 10, bottom: 30, left: 40 };
 
         const points = data.map(d => ({ x: parseFloat(d[metricX]), y: parseFloat(d[metricY]), data: d })).filter(p => !isNaN(p.x) && !isNaN(p.y));
@@ -939,7 +1465,7 @@
         g.append('g').attr('transform', `translate(${margin.left},0)`).call(d3.axisLeft(y).ticks(4)).style('font-size', '9px');
       }, [data, topNData, metricX, metricY, selectedRow, setSelectedRow]);
 
-      return <svg ref={svgRef} width="200" height="200" />;
+      return <svg ref={svgRef} className="w-full h-full" style={{ minWidth: '120px', minHeight: '120px' }} />;
     };
 
     // Box Plot Component
@@ -1091,6 +1617,756 @@
               })}
             </tbody>
           </table>
+        </div>
+      );
+    };
+
+    // Cohort QC View Component
+    const CohortQCView = ({ qcData, cohortQcData, patients, manifestData }) => {
+      const patientIds = Object.keys(patients).sort();
+      const hasMultiGroup = manifestData?.has_multi_group;
+      const allGroups = manifestData?.all_groups || ['default'];
+
+      // Check if we have any QC data at all
+      const hasQcData = Object.keys(qcData).length > 0;
+
+      if (patientIds.length === 0) {
+        return (
+          <div className="bg-white rounded-lg shadow-md p-8 text-center">
+            <Icon name="clipboard-check" size={48} color="#6b7280" className="mx-auto mb-4" />
+            <h2 className="text-xl font-semibold text-gray-800 mb-2">No Data Available</h2>
+            <p className="text-gray-600">
+              Load patient data to view cohort summary.
+            </p>
+          </div>
+        );
+      }
+
+      // Single-group cohort view
+      if (!hasMultiGroup) {
+        return (
+          <div className="space-y-6">
+            <div className="bg-white rounded-lg shadow-md p-6">
+              <h2 className="text-xl font-semibold text-gray-800 mb-4 flex items-center gap-2">
+                <Icon name="clipboard-check" size={24} />
+                Cohort Summary
+              </h2>
+              <p className="text-sm text-gray-600 mb-6">
+                Overview of {patientIds.length} patients in the cohort.
+              </p>
+
+              {/* Patient Summary Table */}
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm border-collapse">
+                  <thead>
+                    <tr className="bg-gray-50">
+                      <th className="text-left py-2 px-3 font-semibold text-gray-700 border-b">Patient</th>
+                      <th className="text-center py-2 px-3 font-semibold text-gray-700 border-b">pMHCs</th>
+                      <th className="text-center py-2 px-3 font-semibold text-gray-700 border-b">Alleles</th>
+                      <th className="text-center py-2 px-3 font-semibold text-gray-700 border-b">Sources</th>
+                      {hasQcData && (
+                        <>
+                          <th className="text-center py-2 px-3 font-semibold text-gray-700 border-b">QC Status</th>
+                        </>
+                      )}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {patientIds.map(patientId => {
+                      const patient = patients[patientId];
+                      return (
+                        <tr key={patientId} className="border-b hover:bg-gray-50">
+                          <td className="py-2 px-3 font-medium">{patientId}</td>
+                          <td className="py-2 px-3 text-center">{patient.data.length}</td>
+                          <td className="py-2 px-3 text-center">{patient.alleles.size}</td>
+                          <td className="py-2 px-3 text-center">{patient.antigenSources.size}</td>
+                          {hasQcData && (
+                            <td className="py-2 px-3 text-center">
+                              {qcData[patientId] ? (
+                                <span className="text-xs px-2 py-0.5 bg-green-100 text-green-700 rounded">Available</span>
+                              ) : (
+                                <span className="text-xs px-2 py-0.5 bg-gray-100 text-gray-500 rounded">N/A</span>
+                              )}
+                            </td>
+                          )}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      // Multi-group cohort view
+      return (
+        <div className="space-y-6">
+          <div className="bg-white rounded-lg shadow-md p-6">
+            <h2 className="text-xl font-semibold text-gray-800 mb-4 flex items-center gap-2">
+              <Icon name="clipboard-check" size={24} />
+              Cohort Summary (Multi-Group)
+            </h2>
+            <p className="text-sm text-gray-600 mb-6">
+              Overview of {patientIds.length} patients across {allGroups.length} groups: {allGroups.join(', ')}
+            </p>
+
+            {/* Multi-group Summary Table */}
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm border-collapse">
+                <thead>
+                  <tr className="bg-gray-50">
+                    <th rowSpan={2} className="text-left py-2 px-3 font-semibold text-gray-700 border-b">Patient</th>
+                    {allGroups.map(group => (
+                      <th key={group} colSpan={2} className="text-center py-2 px-3 font-semibold text-gray-700 border-b border-l bg-purple-50">
+                        {group}
+                      </th>
+                    ))}
+                  </tr>
+                  <tr className="bg-gray-50">
+                    {allGroups.map(group => (
+                      <React.Fragment key={group}>
+                        <th className="text-center py-1 px-2 text-xs font-medium text-gray-600 border-b border-l">pMHCs</th>
+                        <th className="text-center py-1 px-2 text-xs font-medium text-gray-600 border-b">Alleles</th>
+                      </React.Fragment>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {patientIds.map(patientId => {
+                    const patient = patients[patientId];
+                    return (
+                      <tr key={patientId} className="border-b hover:bg-gray-50">
+                        <td className="py-2 px-3 font-medium">
+                          {patientId}
+                          {patient.isMultiGroup && (
+                            <span className="ml-2 text-xs px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded">
+                              {patient.groups.length}g
+                            </span>
+                          )}
+                        </td>
+                        {allGroups.map(group => {
+                          const hasGroup = patient.isMultiGroup
+                            ? patient.groups.includes(group)
+                            : group === 'default' || group === allGroups[0];
+                          const groupData = patient.isMultiGroup
+                            ? patient.groupData?.[group]
+                            : patient;
+
+                          if (!hasGroup || !groupData) {
+                            return (
+                              <React.Fragment key={group}>
+                                <td className="py-2 px-2 text-center text-gray-300 border-l">-</td>
+                                <td className="py-2 px-2 text-center text-gray-300">-</td>
+                              </React.Fragment>
+                            );
+                          }
+
+                          return (
+                            <React.Fragment key={group}>
+                              <td className="py-2 px-2 text-center border-l">{groupData.data?.length || 0}</td>
+                              <td className="py-2 px-2 text-center">{groupData.alleles?.size || 0}</td>
+                            </React.Fragment>
+                          );
+                        })}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Legend */}
+          <div className="bg-white rounded-lg shadow-md p-4">
+            <div className="flex items-center gap-6 text-sm flex-wrap">
+              <span className="font-medium text-gray-700">Legend:</span>
+              <span className="flex items-center gap-1">
+                <span className="px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded text-xs">Ng</span>
+                Number of groups
+              </span>
+              <span className="flex items-center gap-1">
+                <span className="text-gray-300">-</span>
+                No data for this group
+              </span>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    // QC Status Badge Component
+    const QCStatusBadge = ({ status }) => {
+      const colors = {
+        pass: 'bg-green-500',
+        warn: 'bg-yellow-500',
+        fail: 'bg-red-500',
+      };
+      return (
+        <span className={`inline-block w-3 h-3 rounded-full ${colors[status] || 'bg-gray-300'}`} title={status || 'No data'} />
+      );
+    };
+
+    // Patient QC View Component
+    const PatientQCView = ({ patient, qcData, cohortQcData }) => {
+      if (!qcData || Object.keys(qcData).length === 0) {
+        return (
+          <div className="bg-white rounded-lg shadow-md p-8 text-center">
+            <Icon name="clipboard-check" size={48} color="#6b7280" className="mx-auto mb-4" />
+            <h2 className="text-xl font-semibold text-gray-800 mb-2">No QC Data for {patient}</h2>
+            <p className="text-gray-600">
+              Quality control metrics are not available for this sample.
+              <br />
+              Check that QC files exist in <code className="bg-gray-100 px-1 rounded">outputs/qc/{patient}/</code>
+            </p>
+          </div>
+        );
+      }
+
+      return (
+        <div className="space-y-4">
+          <div className="bg-white rounded-lg shadow-md p-6">
+            <h2 className="text-xl font-semibold text-gray-800 mb-4 flex items-center gap-2">
+              <Icon name="clipboard-check" size={24} />
+              Quality Control: {patient}
+            </h2>
+
+            {/* QC Categories */}
+            <div className="space-y-4">
+              <QCSection title="Alignment Metrics" icon="git-merge" data={qcData.alignment} cohortData={cohortQcData?.alignment} />
+              <QCSection title="Variant Calling" icon="dna" data={qcData.variants} cohortData={cohortQcData?.variants} />
+              <QCSection title="Expression" icon="bar-chart-2" data={qcData.expression} cohortData={cohortQcData?.expression} />
+              <QCSection title="HLA Typing" icon="shield" data={qcData.hla} cohortData={cohortQcData?.hla} />
+              <QCSection title="Purity & Ploidy" icon="pie-chart" data={qcData.purity} cohortData={cohortQcData?.purity} />
+              <QCSection title="Antigen Yield" icon="target" data={qcData.antigens} cohortData={cohortQcData?.antigens} />
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    // QC Section Component
+    const QCSection = ({ title, icon, data, cohortData }) => {
+      const [expanded, setExpanded] = useState(false);
+
+      return (
+        <div className="border border-gray-200 rounded-lg">
+          <button
+            onClick={() => setExpanded(!expanded)}
+            className="w-full p-4 flex items-center justify-between text-left hover:bg-gray-50 transition"
+          >
+            <div className="flex items-center gap-3">
+              <Icon name={icon} size={20} className="text-gray-600" />
+              <span className="font-medium text-gray-800">{title}</span>
+              {data?.status && <QCStatusBadge status={data.status} />}
+            </div>
+            <Icon name={expanded ? 'chevron-up' : 'chevron-down'} size={20} className="text-gray-500" />
+          </button>
+
+          {expanded && (
+            <div className="p-4 pt-0 border-t border-gray-200">
+              {data?.metrics ? (
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                  {Object.entries(data.metrics).map(([key, value]) => (
+                    <div key={key} className="bg-gray-50 p-3 rounded">
+                      <div className="text-xs text-gray-500 mb-1">{key.replace(/_/g, ' ')}</div>
+                      <div className="text-sm font-semibold text-gray-800">
+                        {typeof value === 'number' ? value.toLocaleString() : value}
+                      </div>
+                      {cohortData?.metrics?.[key] && (
+                        <div className="text-xs text-gray-400 mt-1">
+                          Cohort avg: {typeof cohortData.metrics[key] === 'number' ? cohortData.metrics[key].toLocaleString() : cohortData.metrics[key]}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm text-gray-500">No metrics available for this category.</p>
+              )}
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    // Joint Analysis Panel Component (for multi-group patients)
+    const JointAnalysisPanel = ({ patient, qcData }) => {
+      const [activeSection, setActiveSection] = useState('sharedness');
+
+      if (!patient || !patient.isMultiGroup || patient.groups.length < 2) {
+        return (
+          <div className="bg-white rounded-lg shadow-md p-8 text-center">
+            <Icon name="git-compare" size={48} color="#6b7280" className="mx-auto mb-4" />
+            <h2 className="text-xl font-semibold text-gray-800 mb-2">Joint Analysis Not Available</h2>
+            <p className="text-gray-600">
+              Joint analysis requires a patient with multiple groups/timepoints.
+            </p>
+          </div>
+        );
+      }
+
+      const groups = patient.groups;
+
+      return (
+        <div className="space-y-6">
+          <div className="bg-white rounded-lg shadow-md p-6">
+            <h2 className="text-xl font-semibold text-gray-800 mb-2 flex items-center gap-2">
+              <Icon name="git-compare" size={24} />
+              Joint Analysis: {patient.id}
+            </h2>
+            <p className="text-sm text-gray-600 mb-4">
+              Comparing {groups.length} groups: {groups.join(' vs ')}
+            </p>
+
+            {/* Section tabs */}
+            <div className="flex flex-wrap gap-2 border-b border-gray-200 pb-4 mb-6">
+              {[
+                { id: 'sharedness', label: 'pMHC Sharedness', icon: 'layers' },
+                { id: 'expression', label: 'Expression Changes', icon: 'trending-up' },
+                { id: 'gainloss', label: 'Gained/Lost Antigens', icon: 'plus-minus' },
+                { id: 'allelic', label: 'Allelic Consistency', icon: 'shield-check' }
+              ].map(section => (
+                <button
+                  key={section.id}
+                  onClick={() => setActiveSection(section.id)}
+                  className={`px-4 py-2 rounded-lg text-sm font-medium transition flex items-center gap-2 ${
+                    activeSection === section.id
+                      ? 'bg-purple-600 text-white'
+                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                  }`}
+                >
+                  <Icon name={section.icon} size={16} />
+                  {section.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Section content */}
+            {activeSection === 'sharedness' && <VennDiagramSection patient={patient} />}
+            {activeSection === 'expression' && <ExpressionComparisonSection patient={patient} />}
+            {activeSection === 'gainloss' && <GainedLostSection patient={patient} />}
+            {activeSection === 'allelic' && <AllelicConsistencySection patient={patient} />}
+          </div>
+        </div>
+      );
+    };
+
+    // Venn Diagram Section - pMHC Sharedness
+    const VennDiagramSection = ({ patient }) => {
+      const groups = patient.groups;
+
+      const analysis = useMemo(() => {
+        // Build peptide-allele sets for each group
+        const peptideSets = {};
+        groups.forEach(group => {
+          peptideSets[group] = new Set(
+            (patient.groupData[group]?.data || []).map(row => `${row.peptide}|${row.allele}`)
+          );
+        });
+
+        // For 2 groups, compute intersection and exclusive sets
+        if (groups.length === 2) {
+          const [g1, g2] = groups;
+          const set1 = peptideSets[g1];
+          const set2 = peptideSets[g2];
+
+          const shared = new Set([...set1].filter(x => set2.has(x)));
+          const exclusive1 = new Set([...set1].filter(x => !set2.has(x)));
+          const exclusive2 = new Set([...set2].filter(x => !set1.has(x)));
+
+          return { peptideSets, shared, exclusive: { [g1]: exclusive1, [g2]: exclusive2 } };
+        }
+
+        // For >2 groups, compute all shared (intersection of all)
+        const allSets = Object.values(peptideSets);
+        const shared = new Set([...allSets[0]].filter(x => allSets.every(s => s.has(x))));
+        const exclusive = {};
+        groups.forEach(group => {
+          exclusive[group] = new Set([...peptideSets[group]].filter(x => !shared.has(x)));
+        });
+
+        return { peptideSets, shared, exclusive };
+      }, [patient, groups]);
+
+      return (
+        <div>
+          <h3 className="text-lg font-semibold text-gray-800 mb-4">pMHC Sharedness Across Groups</h3>
+
+          {/* Summary stats */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+            <div className="bg-purple-50 border border-purple-200 rounded-lg p-4 text-center">
+              <div className="text-3xl font-bold text-purple-700">{analysis.shared.size}</div>
+              <div className="text-sm text-purple-600">Shared pMHCs</div>
+              <div className="text-xs text-purple-500 mt-1">Present in all groups</div>
+            </div>
+            {groups.map(group => (
+              <div key={group} className="bg-gray-50 border border-gray-200 rounded-lg p-4 text-center">
+                <div className="text-3xl font-bold text-gray-700">{analysis.exclusive[group].size}</div>
+                <div className="text-sm text-gray-600">Exclusive to {group}</div>
+                <div className="text-xs text-gray-500 mt-1">Total: {analysis.peptideSets[group].size}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Simple Venn-like visualization for 2 groups */}
+          {groups.length === 2 && (
+            <div className="flex justify-center items-center gap-0 my-8">
+              <div className="w-40 h-40 rounded-full bg-blue-100 border-2 border-blue-400 flex items-center justify-center -mr-12 z-10">
+                <div className="text-center -ml-8">
+                  <div className="text-2xl font-bold text-blue-700">{analysis.exclusive[groups[0]].size}</div>
+                  <div className="text-xs text-blue-600">{groups[0]} only</div>
+                </div>
+              </div>
+              <div className="w-24 h-40 flex items-center justify-center z-20">
+                <div className="text-center bg-purple-200 px-4 py-2 rounded-lg">
+                  <div className="text-2xl font-bold text-purple-700">{analysis.shared.size}</div>
+                  <div className="text-xs text-purple-600">Shared</div>
+                </div>
+              </div>
+              <div className="w-40 h-40 rounded-full bg-green-100 border-2 border-green-400 flex items-center justify-center -ml-12 z-10">
+                <div className="text-center -mr-8">
+                  <div className="text-2xl font-bold text-green-700">{analysis.exclusive[groups[1]].size}</div>
+                  <div className="text-xs text-green-600">{groups[1]} only</div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Detailed table */}
+          <div className="bg-gray-50 rounded-lg p-4 max-h-64 overflow-y-auto">
+            <h4 className="text-sm font-semibold text-gray-700 mb-2">Shared pMHCs ({analysis.shared.size})</h4>
+            {analysis.shared.size > 0 ? (
+              <div className="flex flex-wrap gap-2">
+                {[...analysis.shared].slice(0, 50).map(key => {
+                  const [peptide, allele] = key.split('|');
+                  return (
+                    <span key={key} className="px-2 py-1 bg-purple-100 text-purple-800 rounded text-xs font-mono">
+                      {peptide} ({allele})
+                    </span>
+                  );
+                })}
+                {analysis.shared.size > 50 && (
+                  <span className="px-2 py-1 bg-gray-200 text-gray-600 rounded text-xs">
+                    +{analysis.shared.size - 50} more
+                  </span>
+                )}
+              </div>
+            ) : (
+              <p className="text-sm text-gray-500">No shared pMHCs between groups.</p>
+            )}
+          </div>
+        </div>
+      );
+    };
+
+    // Expression Comparison Section
+    const ExpressionComparisonSection = ({ patient }) => {
+      const groups = patient.groups;
+
+      const comparison = useMemo(() => {
+        if (groups.length < 2) return { data: [], hasExpression: false };
+
+        const [g1, g2] = groups;
+        const data1 = patient.groupData[g1]?.data || [];
+        const data2 = patient.groupData[g2]?.data || [];
+
+        // Index data2 by peptide-allele
+        const index2 = new Map();
+        data2.forEach(row => index2.set(`${row.peptide}|${row.allele}`, row));
+
+        // Find matching peptides and compute fold changes
+        const compared = [];
+        data1.forEach(row1 => {
+          const key = `${row1.peptide}|${row1.allele}`;
+          const row2 = index2.get(key);
+          if (row2) {
+            const tpm1 = parseFloat(row1.tpm) || 0;
+            const tpm2 = parseFloat(row2.tpm) || 0;
+            const log2fc = (tpm1 > 0 && tpm2 > 0) ? Math.log2(tpm2 / tpm1) : 0;
+            compared.push({
+              peptide: row1.peptide,
+              allele: row1.allele,
+              tpm1, tpm2, log2fc,
+              vaf1: parseFloat(row1.vaf) || 0,
+              vaf2: parseFloat(row2.vaf) || 0
+            });
+          }
+        });
+
+        // Sort by absolute fold change
+        compared.sort((a, b) => Math.abs(b.log2fc) - Math.abs(a.log2fc));
+
+        const hasExpression = compared.some(c => c.tpm1 > 0 || c.tpm2 > 0);
+        return { data: compared, hasExpression, g1, g2 };
+      }, [patient, groups]);
+
+      if (!comparison.hasExpression) {
+        return (
+          <div className="text-center py-8">
+            <Icon name="bar-chart-2" size={48} color="#9ca3af" className="mx-auto mb-4" />
+            <p className="text-gray-500">No expression data available for comparison.</p>
+          </div>
+        );
+      }
+
+      return (
+        <div>
+          <h3 className="text-lg font-semibold text-gray-800 mb-4">Expression Changes ({comparison.g1} → {comparison.g2})</h3>
+
+          {/* Summary */}
+          <div className="grid grid-cols-3 gap-4 mb-6">
+            <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-center">
+              <div className="text-2xl font-bold text-red-700">
+                {comparison.data.filter(d => d.log2fc < -1).length}
+              </div>
+              <div className="text-sm text-red-600">Downregulated</div>
+              <div className="text-xs text-red-500">(log2FC &lt; -1)</div>
+            </div>
+            <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 text-center">
+              <div className="text-2xl font-bold text-gray-700">
+                {comparison.data.filter(d => d.log2fc >= -1 && d.log2fc <= 1).length}
+              </div>
+              <div className="text-sm text-gray-600">Stable</div>
+              <div className="text-xs text-gray-500">(|log2FC| ≤ 1)</div>
+            </div>
+            <div className="bg-green-50 border border-green-200 rounded-lg p-4 text-center">
+              <div className="text-2xl font-bold text-green-700">
+                {comparison.data.filter(d => d.log2fc > 1).length}
+              </div>
+              <div className="text-sm text-green-600">Upregulated</div>
+              <div className="text-xs text-green-500">(log2FC &gt; 1)</div>
+            </div>
+          </div>
+
+          {/* Top changes table */}
+          <div className="bg-gray-50 rounded-lg p-4 max-h-80 overflow-y-auto">
+            <h4 className="text-sm font-semibold text-gray-700 mb-3">Top Expression Changes</h4>
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-gray-300">
+                  <th className="text-left py-2">Peptide</th>
+                  <th className="text-left py-2">Allele</th>
+                  <th className="text-right py-2">{comparison.g1} TPM</th>
+                  <th className="text-right py-2">{comparison.g2} TPM</th>
+                  <th className="text-right py-2">Log2 FC</th>
+                </tr>
+              </thead>
+              <tbody>
+                {comparison.data.slice(0, 20).map((row, idx) => (
+                  <tr key={idx} className="border-b border-gray-200">
+                    <td className="py-2 font-mono text-xs">{row.peptide}</td>
+                    <td className="py-2 font-mono text-xs">{row.allele}</td>
+                    <td className="py-2 text-right">{row.tpm1.toFixed(2)}</td>
+                    <td className="py-2 text-right">{row.tpm2.toFixed(2)}</td>
+                    <td className={`py-2 text-right font-semibold ${row.log2fc > 1 ? 'text-green-600' : row.log2fc < -1 ? 'text-red-600' : 'text-gray-600'}`}>
+                      {row.log2fc.toFixed(2)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      );
+    };
+
+    // Gained/Lost Antigens Section
+    const GainedLostSection = ({ patient }) => {
+      const groups = patient.groups;
+
+      const analysis = useMemo(() => {
+        if (groups.length < 2) return { gained: [], lost: [], retained: [] };
+
+        const [g1, g2] = groups;
+        const peptides1 = new Set((patient.groupData[g1]?.data || []).map(r => r.peptide));
+        const peptides2 = new Set((patient.groupData[g2]?.data || []).map(r => r.peptide));
+
+        const gained = [...peptides2].filter(p => !peptides1.has(p));
+        const lost = [...peptides1].filter(p => !peptides2.has(p));
+        const retained = [...peptides1].filter(p => peptides2.has(p));
+
+        return { gained, lost, retained, g1, g2 };
+      }, [patient, groups]);
+
+      return (
+        <div>
+          <h3 className="text-lg font-semibold text-gray-800 mb-4">Antigen Changes ({analysis.g1} → {analysis.g2})</h3>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+            {/* Lost */}
+            <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <Icon name="minus-circle" size={20} className="text-red-600" />
+                <span className="font-semibold text-red-800">Lost Antigens</span>
+                <span className="ml-auto text-2xl font-bold text-red-700">{analysis.lost.length}</span>
+              </div>
+              <div className="max-h-40 overflow-y-auto">
+                {analysis.lost.length > 0 ? (
+                  <div className="flex flex-wrap gap-1">
+                    {analysis.lost.slice(0, 30).map(p => (
+                      <span key={p} className="px-2 py-0.5 bg-red-100 text-red-700 rounded text-xs font-mono">{p}</span>
+                    ))}
+                    {analysis.lost.length > 30 && <span className="text-xs text-red-500">+{analysis.lost.length - 30} more</span>}
+                  </div>
+                ) : (
+                  <p className="text-sm text-red-400">No antigens lost</p>
+                )}
+              </div>
+            </div>
+
+            {/* Retained */}
+            <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <Icon name="check-circle" size={20} className="text-gray-600" />
+                <span className="font-semibold text-gray-800">Retained</span>
+                <span className="ml-auto text-2xl font-bold text-gray-700">{analysis.retained.length}</span>
+              </div>
+              <p className="text-sm text-gray-500">Present in both groups</p>
+            </div>
+
+            {/* Gained */}
+            <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <Icon name="plus-circle" size={20} className="text-green-600" />
+                <span className="font-semibold text-green-800">Gained Antigens</span>
+                <span className="ml-auto text-2xl font-bold text-green-700">{analysis.gained.length}</span>
+              </div>
+              <div className="max-h-40 overflow-y-auto">
+                {analysis.gained.length > 0 ? (
+                  <div className="flex flex-wrap gap-1">
+                    {analysis.gained.slice(0, 30).map(p => (
+                      <span key={p} className="px-2 py-0.5 bg-green-100 text-green-700 rounded text-xs font-mono">{p}</span>
+                    ))}
+                    {analysis.gained.length > 30 && <span className="text-xs text-green-500">+{analysis.gained.length - 30} more</span>}
+                  </div>
+                ) : (
+                  <p className="text-sm text-green-400">No new antigens gained</p>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    // Allelic Consistency Section (LOH Detection)
+    const AllelicConsistencySection = ({ patient }) => {
+      const groups = patient.groups;
+
+      const analysis = useMemo(() => {
+        // Collect alleles from each group
+        const allelesByGroup = {};
+        groups.forEach(group => {
+          allelesByGroup[group] = patient.groupData[group]?.alleles || new Set();
+        });
+
+        // Find all unique alleles
+        const allAlleles = new Set();
+        Object.values(allelesByGroup).forEach(set => {
+          set.forEach(a => allAlleles.add(a));
+        });
+
+        // Categorize alleles
+        const consistent = [];
+        const potentialLOH = [];
+
+        allAlleles.forEach(allele => {
+          const presentIn = groups.filter(g => allelesByGroup[g].has(allele));
+          if (presentIn.length === groups.length) {
+            consistent.push({ allele, status: 'present' });
+          } else {
+            potentialLOH.push({
+              allele,
+              presentIn,
+              absentIn: groups.filter(g => !allelesByGroup[g].has(allele))
+            });
+          }
+        });
+
+        return { consistent, potentialLOH, allelesByGroup, groups };
+      }, [patient, groups]);
+
+      return (
+        <div>
+          <h3 className="text-lg font-semibold text-gray-800 mb-4">Allelic Consistency Check</h3>
+
+          {/* Alert for potential LOH */}
+          {analysis.potentialLOH.length > 0 ? (
+            <div className="bg-yellow-50 border-l-4 border-yellow-400 p-4 mb-6">
+              <div className="flex items-center gap-2 mb-2">
+                <Icon name="alert-triangle" size={20} className="text-yellow-600" />
+                <h4 className="font-semibold text-yellow-800">Potential Loss of Heterozygosity Detected</h4>
+              </div>
+              <p className="text-sm text-yellow-700 mb-3">
+                The following HLA alleles show inconsistent presence across groups, which may indicate LOH:
+              </p>
+              <div className="space-y-2">
+                {analysis.potentialLOH.map(({ allele, presentIn, absentIn }) => (
+                  <div key={allele} className="flex items-center gap-2 text-sm">
+                    <span className="font-mono font-semibold text-yellow-900">{allele}</span>
+                    <span className="text-yellow-700">
+                      Present in: {presentIn.join(', ')} | Absent in: {absentIn.join(', ')}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="bg-green-50 border-l-4 border-green-400 p-4 mb-6">
+              <div className="flex items-center gap-2">
+                <Icon name="check-circle" size={20} className="text-green-600" />
+                <h4 className="font-semibold text-green-800">HLA Alleles Consistent Across Groups</h4>
+              </div>
+              <p className="text-sm text-green-700 mt-1">
+                All {analysis.consistent.length} alleles are present in both groups. No evidence of LOH.
+              </p>
+            </div>
+          )}
+
+          {/* Allele comparison table */}
+          <div className="bg-gray-50 rounded-lg p-4">
+            <h4 className="text-sm font-semibold text-gray-700 mb-3">Allele Presence by Group</h4>
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-gray-300">
+                  <th className="text-left py-2">Allele</th>
+                  {groups.map(g => (
+                    <th key={g} className="text-center py-2">{g}</th>
+                  ))}
+                  <th className="text-left py-2">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[...analysis.consistent, ...analysis.potentialLOH].map(item => {
+                  const allele = item.allele;
+                  const isLOH = item.absentIn !== undefined;
+                  return (
+                    <tr key={allele} className={`border-b border-gray-200 ${isLOH ? 'bg-yellow-50' : ''}`}>
+                      <td className="py-2 font-mono text-xs">{allele}</td>
+                      {groups.map(g => (
+                        <td key={g} className="py-2 text-center">
+                          {analysis.allelesByGroup[g].has(allele) ? (
+                            <Icon name="check" size={16} className="text-green-600 mx-auto" />
+                          ) : (
+                            <Icon name="x" size={16} className="text-red-600 mx-auto" />
+                          )}
+                        </td>
+                      ))}
+                      <td className="py-2">
+                        {isLOH ? (
+                          <span className="text-xs px-2 py-0.5 bg-yellow-200 text-yellow-800 rounded">Potential LOH</span>
+                        ) : (
+                          <span className="text-xs px-2 py-0.5 bg-green-200 text-green-800 rounded">Consistent</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
       );
     };
