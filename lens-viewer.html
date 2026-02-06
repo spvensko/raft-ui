@@ -1994,8 +1994,42 @@
                 </div>
               )}
 
+              {hasData && toolName === 'seq2hla' && Array.isArray(data) && (
+                <div>
+                  <h4 className="text-sm font-medium text-gray-700 mb-2">HLA Class I Typing (RNA)</h4>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm border-collapse">
+                      <thead>
+                        <tr className="bg-gray-50">
+                          <th className="py-2 px-3 text-left font-medium border-b">Locus</th>
+                          <th className="py-2 px-3 text-left font-medium border-b">Allele 1</th>
+                          <th className="py-2 px-3 text-center font-medium border-b">Confidence</th>
+                          <th className="py-2 px-3 text-left font-medium border-b">Allele 2</th>
+                          <th className="py-2 px-3 text-center font-medium border-b">Confidence</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {data.map((r, i) => (
+                          <tr key={i} className="border-b">
+                            <td className="py-2 px-3 font-medium">HLA-{r.locus}</td>
+                            <td className="py-2 px-3">
+                              <span className="px-2 py-0.5 bg-blue-100 text-blue-800 rounded text-xs font-medium">{r.allele1}</span>
+                            </td>
+                            <td className="py-2 px-3 text-center text-xs">{formatQcValue(r.confidence1)}</td>
+                            <td className="py-2 px-3">
+                              <span className="px-2 py-0.5 bg-blue-100 text-blue-800 rounded text-xs font-medium">{r.allele2}</span>
+                            </td>
+                            <td className="py-2 px-3 text-center text-xs">{formatQcValue(r.confidence2)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
               {/* Generic metrics display for standard tools */}
-              {hasData && !['somalier', 'whatshap', 'lohhla', 'parse_lohhla'].includes(toolName) && (
+              {hasData && !['somalier', 'whatshap', 'lohhla', 'parse_lohhla', 'seq2hla'].includes(toolName) && (
                 (() => {
                   // Check if data is nested (multiple files: {filename: {metrics}})
                   const firstVal = Object.values(data)[0];
