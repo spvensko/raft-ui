@@ -326,6 +326,24 @@
         loadManifestData();
       }, []);
 
+      // Fetch QC data from backend
+      useEffect(() => {
+        const loadQcData = async () => {
+          try {
+            const resp = await fetch(`${API_BASE}/api/qc-data`);
+            if (resp.ok) {
+              const data = await resp.json();
+              if (data && Object.keys(data.patients || {}).length > 0) {
+                setQcData(data);
+              }
+            }
+          } catch (e) {
+            console.warn('No QC data available:', e);
+          }
+        };
+        loadQcData();
+      }, []);
+
       // Extract run names from filename (separated by '+')
       const extractRunNamesFromFilename = (filename) => {
         // Remove directory prefix if present (lens/filename.tsv -> filename.tsv)
@@ -718,7 +736,7 @@
                 </div>
               ) : viewMode === 'cohort-qc' ? (
                 <div className="overflow-y-auto flex-1">
-                  <CohortQCView qcData={qcData} cohortQcData={cohortQcData} patients={patients} manifestData={manifestData} />
+                  <CohortQCView qcData={qcData} patients={patients} manifestData={manifestData} />
                 </div>
               ) : selectedGroup === 'joint' && patients[selectedPatient]?.isMultiGroup ? (
                 /* Joint Analysis View for multi-group patients */
@@ -787,9 +805,9 @@
                         }`}
                       >
                         Quality Control
-                        {qcData[selectedPatient] && (
+                        {qcData?.patients?.[selectedPatient] && (
                           <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">
-                            {Object.keys(qcData[selectedPatient] || {}).length}
+                            {Object.keys(qcData.patients[selectedPatient]).length}
                           </span>
                         )}
                       </button>
@@ -861,8 +879,7 @@
                   <div className="flex-1 overflow-y-auto">
                     <PatientQCView
                       patient={selectedPatient}
-                      qcData={qcData[selectedPatient]}
-                      cohortQcData={cohortQcData}
+                      qcData={qcData}
                     />
                   </div>
                   )}
@@ -959,9 +976,9 @@
             >
               <Icon name="clipboard-check" size={18} />
               <span>Cohort QC</span>
-              {Object.keys(qcData).length > 0 && (
+              {Object.keys(qcData?.patients || {}).length > 0 && (
                 <span className={`ml-auto text-xs px-2 py-0.5 rounded-full ${viewMode === 'cohort-qc' ? 'bg-emerald-500' : 'bg-emerald-100 text-emerald-700'}`}>
-                  {Object.keys(qcData).length}
+                  {Object.keys(qcData.patients).length}
                 </span>
               )}
             </button>
@@ -1622,154 +1639,125 @@
     };
 
     // Cohort QC View Component
-    const CohortQCView = ({ qcData, cohortQcData, patients, manifestData }) => {
+    const CohortQCView = ({ qcData, patients, manifestData }) => {
       const patientIds = Object.keys(patients).sort();
       const hasMultiGroup = manifestData?.has_multi_group;
       const allGroups = manifestData?.all_groups || ['default'];
-
-      // Check if we have any QC data at all
-      const hasQcData = Object.keys(qcData).length > 0;
+      const qcPatients = qcData?.patients || {};
+      const hasQcData = Object.keys(qcPatients).length > 0;
 
       if (patientIds.length === 0) {
         return (
           <div className="bg-white rounded-lg shadow-md p-8 text-center">
             <Icon name="clipboard-check" size={48} color="#6b7280" className="mx-auto mb-4" />
             <h2 className="text-xl font-semibold text-gray-800 mb-2">No Data Available</h2>
-            <p className="text-gray-600">
-              Load patient data to view cohort summary.
-            </p>
+            <p className="text-gray-600">Load patient data to view cohort summary.</p>
           </div>
         );
       }
 
-      // Single-group cohort view
-      if (!hasMultiGroup) {
-        return (
-          <div className="space-y-6">
-            <div className="bg-white rounded-lg shadow-md p-6">
-              <h2 className="text-xl font-semibold text-gray-800 mb-4 flex items-center gap-2">
-                <Icon name="clipboard-check" size={24} />
-                Cohort Summary
-              </h2>
-              <p className="text-sm text-gray-600 mb-6">
-                Overview of {patientIds.length} patients in the cohort.
-              </p>
+      // Count QC tools per patient
+      const getToolCount = (patientId) => {
+        const patQc = qcPatients[patientId];
+        if (!patQc) return 0;
+        let count = 0;
+        for (const runDir of Object.values(patQc)) {
+          count += Object.keys(runDir).length;
+        }
+        return count;
+      };
 
-              {/* Patient Summary Table */}
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm border-collapse">
-                  <thead>
-                    <tr className="bg-gray-50">
-                      <th className="text-left py-2 px-3 font-semibold text-gray-700 border-b">Patient</th>
-                      <th className="text-center py-2 px-3 font-semibold text-gray-700 border-b">pMHCs</th>
-                      <th className="text-center py-2 px-3 font-semibold text-gray-700 border-b">Alleles</th>
-                      <th className="text-center py-2 px-3 font-semibold text-gray-700 border-b">Sources</th>
-                      {hasQcData && (
-                        <>
-                          <th className="text-center py-2 px-3 font-semibold text-gray-700 border-b">QC Status</th>
-                        </>
-                      )}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {patientIds.map(patientId => {
-                      const patient = patients[patientId];
-                      return (
-                        <tr key={patientId} className="border-b hover:bg-gray-50">
-                          <td className="py-2 px-3 font-medium">{patientId}</td>
-                          <td className="py-2 px-3 text-center">{patient.data.length}</td>
-                          <td className="py-2 px-3 text-center">{patient.alleles.size}</td>
-                          <td className="py-2 px-3 text-center">{patient.antigenSources.size}</td>
-                          {hasQcData && (
-                            <td className="py-2 px-3 text-center">
-                              {qcData[patientId] ? (
-                                <span className="text-xs px-2 py-0.5 bg-green-100 text-green-700 rounded">Available</span>
-                              ) : (
-                                <span className="text-xs px-2 py-0.5 bg-gray-100 text-gray-500 rounded">N/A</span>
-                              )}
-                            </td>
-                          )}
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-        );
-      }
-
-      // Multi-group cohort view
       return (
         <div className="space-y-6">
           <div className="bg-white rounded-lg shadow-md p-6">
             <h2 className="text-xl font-semibold text-gray-800 mb-4 flex items-center gap-2">
               <Icon name="clipboard-check" size={24} />
-              Cohort Summary (Multi-Group)
+              Cohort Summary{hasMultiGroup ? ' (Multi-Group)' : ''}
             </h2>
             <p className="text-sm text-gray-600 mb-6">
-              Overview of {patientIds.length} patients across {allGroups.length} groups: {allGroups.join(', ')}
+              Overview of {patientIds.length} patients{hasMultiGroup ? ` across ${allGroups.length} groups: ${allGroups.join(', ')}` : ''}.
             </p>
 
-            {/* Multi-group Summary Table */}
             <div className="overflow-x-auto">
               <table className="w-full text-sm border-collapse">
                 <thead>
                   <tr className="bg-gray-50">
-                    <th rowSpan={2} className="text-left py-2 px-3 font-semibold text-gray-700 border-b">Patient</th>
-                    {allGroups.map(group => (
-                      <th key={group} colSpan={2} className="text-center py-2 px-3 font-semibold text-gray-700 border-b border-l bg-purple-50">
-                        {group}
-                      </th>
-                    ))}
+                    <th className="text-left py-2 px-3 font-semibold text-gray-700 border-b">Patient</th>
+                    {hasMultiGroup ? (
+                      allGroups.map(group => (
+                        <th key={group} colSpan={2} className="text-center py-2 px-3 font-semibold text-gray-700 border-b border-l bg-purple-50">{group}</th>
+                      ))
+                    ) : (
+                      <>
+                        <th className="text-center py-2 px-3 font-semibold text-gray-700 border-b">pMHCs</th>
+                        <th className="text-center py-2 px-3 font-semibold text-gray-700 border-b">Alleles</th>
+                        <th className="text-center py-2 px-3 font-semibold text-gray-700 border-b">Sources</th>
+                      </>
+                    )}
+                    {hasQcData && (
+                      <th className="text-center py-2 px-3 font-semibold text-gray-700 border-b">QC Tools</th>
+                    )}
                   </tr>
-                  <tr className="bg-gray-50">
-                    {allGroups.map(group => (
-                      <React.Fragment key={group}>
-                        <th className="text-center py-1 px-2 text-xs font-medium text-gray-600 border-b border-l">pMHCs</th>
-                        <th className="text-center py-1 px-2 text-xs font-medium text-gray-600 border-b">Alleles</th>
-                      </React.Fragment>
-                    ))}
-                  </tr>
+                  {hasMultiGroup && (
+                    <tr className="bg-gray-50">
+                      <th></th>
+                      {allGroups.map(group => (
+                        <React.Fragment key={group}>
+                          <th className="text-center py-1 px-2 text-xs font-medium text-gray-600 border-b border-l">pMHCs</th>
+                          <th className="text-center py-1 px-2 text-xs font-medium text-gray-600 border-b">Alleles</th>
+                        </React.Fragment>
+                      ))}
+                      {hasQcData && <th></th>}
+                    </tr>
+                  )}
                 </thead>
                 <tbody>
                   {patientIds.map(patientId => {
                     const patient = patients[patientId];
+                    const toolCount = getToolCount(patientId);
                     return (
                       <tr key={patientId} className="border-b hover:bg-gray-50">
                         <td className="py-2 px-3 font-medium">
                           {patientId}
                           {patient.isMultiGroup && (
-                            <span className="ml-2 text-xs px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded">
-                              {patient.groups.length}g
-                            </span>
+                            <span className="ml-2 text-xs px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded">{patient.groups.length}g</span>
                           )}
                         </td>
-                        {allGroups.map(group => {
-                          const hasGroup = patient.isMultiGroup
-                            ? patient.groups.includes(group)
-                            : group === 'default' || group === allGroups[0];
-                          const groupData = patient.isMultiGroup
-                            ? patient.groupData?.[group]
-                            : patient;
-
-                          if (!hasGroup || !groupData) {
+                        {hasMultiGroup ? (
+                          allGroups.map(group => {
+                            const hasGroup = patient.isMultiGroup ? patient.groups.includes(group) : group === 'default' || group === allGroups[0];
+                            const groupData = patient.isMultiGroup ? patient.groupData?.[group] : patient;
+                            if (!hasGroup || !groupData) {
+                              return (
+                                <React.Fragment key={group}>
+                                  <td className="py-2 px-2 text-center text-gray-300 border-l">-</td>
+                                  <td className="py-2 px-2 text-center text-gray-300">-</td>
+                                </React.Fragment>
+                              );
+                            }
                             return (
                               <React.Fragment key={group}>
-                                <td className="py-2 px-2 text-center text-gray-300 border-l">-</td>
-                                <td className="py-2 px-2 text-center text-gray-300">-</td>
+                                <td className="py-2 px-2 text-center border-l">{groupData.data?.length || 0}</td>
+                                <td className="py-2 px-2 text-center">{groupData.alleles?.size || 0}</td>
                               </React.Fragment>
                             );
-                          }
-
-                          return (
-                            <React.Fragment key={group}>
-                              <td className="py-2 px-2 text-center border-l">{groupData.data?.length || 0}</td>
-                              <td className="py-2 px-2 text-center">{groupData.alleles?.size || 0}</td>
-                            </React.Fragment>
-                          );
-                        })}
+                          })
+                        ) : (
+                          <>
+                            <td className="py-2 px-3 text-center">{patient.data.length}</td>
+                            <td className="py-2 px-3 text-center">{patient.alleles.size}</td>
+                            <td className="py-2 px-3 text-center">{patient.antigenSources.size}</td>
+                          </>
+                        )}
+                        {hasQcData && (
+                          <td className="py-2 px-3 text-center">
+                            {toolCount > 0 ? (
+                              <span className="text-xs px-2 py-0.5 bg-green-100 text-green-700 rounded">{toolCount} tools</span>
+                            ) : (
+                              <span className="text-xs px-2 py-0.5 bg-gray-100 text-gray-500 rounded">N/A</span>
+                            )}
+                          </td>
+                        )}
                       </tr>
                     );
                   })}
@@ -1777,52 +1765,313 @@
               </table>
             </div>
           </div>
+        </div>
+      );
+    };
 
-          {/* Legend */}
-          <div className="bg-white rounded-lg shadow-md p-4">
-            <div className="flex items-center gap-6 text-sm flex-wrap">
-              <span className="font-medium text-gray-700">Legend:</span>
-              <span className="flex items-center gap-1">
-                <span className="px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded text-xs">Ng</span>
-                Number of groups
-              </span>
-              <span className="flex items-center gap-1">
-                <span className="text-gray-300">-</span>
-                No data for this group
-              </span>
-            </div>
+    // Format a numeric value for display
+    const formatQcValue = (value) => {
+      if (value === null || value === undefined) return '-';
+      if (typeof value === 'number') {
+        if (Number.isInteger(value) && Math.abs(value) > 9999) return value.toLocaleString();
+        if (typeof value === 'number' && !Number.isInteger(value)) {
+          if (Math.abs(value) < 0.001 && value !== 0) return value.toExponential(2);
+          return parseFloat(value.toPrecision(6)).toString();
+        }
+        return value.toLocaleString();
+      }
+      return String(value);
+    };
+
+    // QC Metrics Table - displays key-value pairs from a parsed tool
+    const QCMetricsTable = ({ data, title }) => {
+      if (!data || typeof data !== 'object') return null;
+      const entries = Object.entries(data).filter(([k, v]) => v !== null && v !== undefined && v !== '');
+      if (entries.length === 0) return null;
+
+      return (
+        <div>
+          {title && <h4 className="text-sm font-medium text-gray-700 mb-2">{title}</h4>}
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+            {entries.map(([key, value]) => (
+              <div key={key} className="bg-gray-50 px-3 py-2 rounded text-sm">
+                <div className="text-xs text-gray-500 truncate" title={key}>{key}</div>
+                <div className="font-medium text-gray-800 truncate" title={String(value)}>{formatQcValue(value)}</div>
+              </div>
+            ))}
           </div>
         </div>
       );
     };
 
-    // QC Status Badge Component
-    const QCStatusBadge = ({ status }) => {
-      const colors = {
-        pass: 'bg-green-500',
-        warn: 'bg-yellow-500',
-        fail: 'bg-red-500',
+    // QC Tool Section - collapsible section for a single QC tool
+    const QCToolSection = ({ toolName, toolData, patientId }) => {
+      const [expanded, setExpanded] = useState(false);
+      const label = toolData.label || toolName.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+      const data = toolData.data;
+      const files = toolData.files || [];
+      const hasPdfs = files.some(f => f.type === 'pdf');
+      const hasHtml = files.some(f => f.type === 'html');
+      const hasData = data && (Array.isArray(data) ? data.length > 0 : Object.keys(data).length > 0);
+
+      // Tool icon mapping
+      const iconMap = {
+        samtools_stats: 'bar-chart-2',
+        fastp: 'filter',
+        qualimap_bamqc: 'align-left',
+        qualimap_rnaseq: 'align-left',
+        picard2_collect_rna_seq_metrics: 'file-text',
+        star_map: 'star',
+        bcftools_stats: 'git-branch',
+        somalier: 'users',
+        whatshap: 'link',
+        gatk4_merge_mutect_stats: 'activity',
+        parse_lohhla: 'shield',
+        lohhla: 'shield',
+        igv_reports: 'eye',
+        cnvkit_diagram: 'image',
+        cnvkit_scatter: 'image',
+        lenstools_snv_funnel: 'filter',
+        lenstools_indel_funnel: 'filter',
+        lenstools_splice_funnel: 'filter',
+        lenstools_fusion_funnel: 'filter',
       };
+      const icon = iconMap[toolName] || 'file-text';
+
       return (
-        <span className={`inline-block w-3 h-3 rounded-full ${colors[status] || 'bg-gray-300'}`} title={status || 'No data'} />
+        <div className="border border-gray-200 rounded-lg">
+          <button
+            onClick={() => setExpanded(!expanded)}
+            className="w-full p-3 flex items-center justify-between text-left hover:bg-gray-50 transition"
+          >
+            <div className="flex items-center gap-2">
+              <Icon name={icon} size={18} className="text-gray-600" />
+              <span className="font-medium text-gray-800 text-sm">{label}</span>
+              {hasData && <span className="text-xs px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded">data</span>}
+              {hasPdfs && <span className="text-xs px-1.5 py-0.5 bg-orange-100 text-orange-700 rounded">PDF</span>}
+              {hasHtml && <span className="text-xs px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded">HTML</span>}
+            </div>
+            <Icon name={expanded ? 'chevron-up' : 'chevron-down'} size={18} className="text-gray-500" />
+          </button>
+
+          {expanded && (
+            <div className="p-4 pt-0 border-t border-gray-200 space-y-4">
+              {/* Parsed data display */}
+              {hasData && toolName === 'somalier' && data.samples && (
+                <div>
+                  <h4 className="text-sm font-medium text-gray-700 mb-2">Sample Statistics</h4>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs border-collapse">
+                      <thead>
+                        <tr className="bg-gray-50">
+                          {['sample_id', 'gt_depth_mean', 'gt_depth_sd', 'n_hom_ref', 'n_het', 'n_hom_alt', 'ab_mean'].map(col => (
+                            <th key={col} className="py-1 px-2 text-left font-medium border-b">{col}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {data.samples.map((s, i) => (
+                          <tr key={i} className="border-b">
+                            <td className="py-1 px-2 font-medium">{s.sample_id}</td>
+                            <td className="py-1 px-2">{formatQcValue(s.gt_depth_mean)}</td>
+                            <td className="py-1 px-2">{formatQcValue(s.gt_depth_sd)}</td>
+                            <td className="py-1 px-2">{formatQcValue(s.n_hom_ref)}</td>
+                            <td className="py-1 px-2">{formatQcValue(s.n_het)}</td>
+                            <td className="py-1 px-2">{formatQcValue(s.n_hom_alt)}</td>
+                            <td className="py-1 px-2">{formatQcValue(s.ab_mean)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {data.pairs && data.pairs.length > 0 && (
+                    <div className="mt-3">
+                      <h4 className="text-sm font-medium text-gray-700 mb-2">Pairwise Relatedness</h4>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-xs border-collapse">
+                          <thead>
+                            <tr className="bg-gray-50">
+                              {['sample_a', 'sample_b', 'relatedness', 'ibs0', 'ibs2', 'hom_concordance'].map(col => (
+                                <th key={col} className="py-1 px-2 text-left font-medium border-b">{col}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {data.pairs.map((p, i) => (
+                              <tr key={i} className="border-b">
+                                <td className="py-1 px-2 font-medium">{p.sample_a?.split('-').pop()}</td>
+                                <td className="py-1 px-2 font-medium">{p.sample_b?.split('-').pop()}</td>
+                                <td className="py-1 px-2">
+                                  <span className={`px-1.5 py-0.5 rounded text-xs ${p.relatedness >= 0.9 ? 'bg-green-100 text-green-800' : p.relatedness >= 0.5 ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800'}`}>
+                                    {formatQcValue(p.relatedness)}
+                                  </span>
+                                </td>
+                                <td className="py-1 px-2">{formatQcValue(p.ibs0)}</td>
+                                <td className="py-1 px-2">{formatQcValue(p.ibs2)}</td>
+                                <td className="py-1 px-2">{formatQcValue(p.hom_concordance)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {hasData && toolName === 'whatshap' && data.stats && (
+                <div>
+                  <h4 className="text-sm font-medium text-gray-700 mb-2">Phasing Summary</h4>
+                  {data.stats.map((s, i) => (
+                    <div key={i} className="mb-2">
+                      <div className="text-xs text-gray-500 mb-1">{s.file}</div>
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                        {['variants', 'phased', 'unphased', 'blocks', 'heterozygous_variants', 'phased_fraction'].map(key => (
+                          s.summary[key] !== undefined && (
+                            <div key={key} className="bg-gray-50 px-2 py-1 rounded text-sm">
+                              <div className="text-xs text-gray-500">{key}</div>
+                              <div className="font-medium">{formatQcValue(s.summary[key])}</div>
+                            </div>
+                          )
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {hasData && toolName === 'lohhla' && data.predictions && (
+                <div>
+                  <h4 className="text-sm font-medium text-gray-700 mb-2">HLA Loss Predictions</h4>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs border-collapse">
+                      <thead>
+                        <tr className="bg-gray-50">
+                          {['region', 'HLA_A_type1', 'HLA_A_type2', 'HLA_type1copyNum_withBAF', 'HLA_type2copyNum_withBAF', 'PVal_unique', 'LossAllele', 'KeptAllele'].map(col => (
+                            <th key={col} className="py-1 px-2 text-left font-medium border-b whitespace-nowrap">{col}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {data.predictions.map((r, i) => (
+                          <tr key={i} className="border-b">
+                            <td className="py-1 px-2">{r.region?.split('.').pop()}</td>
+                            <td className="py-1 px-2">{r.HLA_A_type1}</td>
+                            <td className="py-1 px-2">{r.HLA_A_type2}</td>
+                            <td className="py-1 px-2">{formatQcValue(r.HLA_type1copyNum_withBAF)}</td>
+                            <td className="py-1 px-2">{formatQcValue(r.HLA_type2copyNum_withBAF)}</td>
+                            <td className="py-1 px-2">
+                              <span className={`px-1.5 py-0.5 rounded ${r.PVal_unique < 0.05 ? 'bg-red-100 text-red-800' : 'bg-gray-100'}`}>
+                                {formatQcValue(r.PVal_unique)}
+                              </span>
+                            </td>
+                            <td className="py-1 px-2 text-red-700">{r.LossAllele}</td>
+                            <td className="py-1 px-2 text-green-700">{r.KeptAllele}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {hasData && toolName === 'parse_lohhla' && Array.isArray(data) && (
+                <div>
+                  <h4 className="text-sm font-medium text-gray-700 mb-2">LOHHLA Loss Summary</h4>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                    {data.map((r, i) => (
+                      <div key={i} className="flex items-center gap-3 bg-gray-50 px-3 py-2 rounded">
+                        <span className="font-medium text-sm">{r.allele}</span>
+                        <span className={`text-xs px-2 py-0.5 rounded ${r.lohhla_allele_loss_pval < 0.05 ? 'bg-red-100 text-red-800' : 'bg-green-100 text-green-800'}`}>
+                          p = {formatQcValue(r.lohhla_allele_loss_pval)}
+                        </span>
+                        {r.lohhla_allele_loss_pval < 0.05 && (
+                          <span className="text-xs text-red-600 font-medium">LOH</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Generic metrics display for standard tools */}
+              {hasData && !['somalier', 'whatshap', 'lohhla', 'parse_lohhla'].includes(toolName) && (
+                (() => {
+                  // Check if data is nested (multiple files: {filename: {metrics}})
+                  const firstVal = Object.values(data)[0];
+                  const isNested = typeof firstVal === 'object' && firstVal !== null && !Array.isArray(firstVal);
+                  if (isNested) {
+                    return Object.entries(data).map(([fname, metrics]) => (
+                      <QCMetricsTable key={fname} data={metrics} title={fname} />
+                    ));
+                  }
+                  return <QCMetricsTable data={data} />;
+                })()
+              )}
+
+              {/* PDF embeds */}
+              {files.filter(f => f.type === 'pdf').map((f, i) => (
+                <div key={i}>
+                  <h4 className="text-sm font-medium text-gray-700 mb-2">{f.name}</h4>
+                  <iframe
+                    src={`${API_BASE}/api/qc-file?path=${encodeURIComponent(f.path)}`}
+                    className="w-full border border-gray-200 rounded"
+                    style={{ height: '500px' }}
+                    title={f.name}
+                  />
+                </div>
+              ))}
+
+              {/* HTML links (IGV reports, qualimap reports) */}
+              {files.filter(f => f.type === 'html').map((f, i) => (
+                <div key={i}>
+                  <a
+                    href={`${API_BASE}/api/qc-file?path=${encodeURIComponent(f.path)}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-2 text-sm text-indigo-600 hover:text-indigo-800 underline"
+                  >
+                    <Icon name="external-link" size={14} />
+                    Open {f.name} in new tab
+                  </a>
+                </div>
+              ))}
+
+              {!hasData && files.length === 0 && (
+                <p className="text-sm text-gray-500">No parsable data found for this tool.</p>
+              )}
+            </div>
+          )}
+        </div>
       );
     };
 
     // Patient QC View Component
-    const PatientQCView = ({ patient, qcData, cohortQcData }) => {
-      if (!qcData || Object.keys(qcData).length === 0) {
+    const PatientQCView = ({ patient, qcData }) => {
+      const patientData = qcData?.patients?.[patient];
+
+      if (!patientData || Object.keys(patientData).length === 0) {
         return (
           <div className="bg-white rounded-lg shadow-md p-8 text-center">
             <Icon name="clipboard-check" size={48} color="#6b7280" className="mx-auto mb-4" />
             <h2 className="text-xl font-semibold text-gray-800 mb-2">No QC Data for {patient}</h2>
             <p className="text-gray-600">
-              Quality control metrics are not available for this sample.
+              Quality control metrics are not available for this patient.
               <br />
-              Check that QC files exist in <code className="bg-gray-100 px-1 rounded">outputs/qc/{patient}/</code>
+              Check that QC files exist in <code className="bg-gray-100 px-1 rounded">outputs/qc/*/</code>
             </p>
           </div>
         );
       }
+
+      // Organize run directories by type: single-sample vs multi-sample
+      const runDirs = Object.keys(patientData).sort((a, b) => {
+        // Sort single-sample first, then multi-sample
+        const aMulti = a.includes('+');
+        const bMulti = b.includes('+');
+        if (aMulti !== bMulti) return aMulti ? 1 : -1;
+        return a.localeCompare(b);
+      });
 
       return (
         <div className="space-y-4">
@@ -1831,62 +2080,51 @@
               <Icon name="clipboard-check" size={24} />
               Quality Control: {patient}
             </h2>
+            <p className="text-sm text-gray-500 mb-4">
+              {runDirs.length} sample group{runDirs.length !== 1 ? 's' : ''} with QC data
+            </p>
 
-            {/* QC Categories */}
-            <div className="space-y-4">
-              <QCSection title="Alignment Metrics" icon="git-merge" data={qcData.alignment} cohortData={cohortQcData?.alignment} />
-              <QCSection title="Variant Calling" icon="dna" data={qcData.variants} cohortData={cohortQcData?.variants} />
-              <QCSection title="Expression" icon="bar-chart-2" data={qcData.expression} cohortData={cohortQcData?.expression} />
-              <QCSection title="HLA Typing" icon="shield" data={qcData.hla} cohortData={cohortQcData?.hla} />
-              <QCSection title="Purity & Ploidy" icon="pie-chart" data={qcData.purity} cohortData={cohortQcData?.purity} />
-              <QCSection title="Antigen Yield" icon="target" data={qcData.antigens} cohortData={cohortQcData?.antigens} />
-            </div>
-          </div>
-        </div>
-      );
-    };
+            {runDirs.map(runDir => {
+              const tools = patientData[runDir];
+              const toolNames = Object.keys(tools).sort();
+              const isMultiSample = runDir.includes('+');
+              const runLabel = isMultiSample ? runDir.split('+').join(' + ') : runDir;
+              const typeLabel = runDir.startsWith('ad') ? 'DNA (Tumor)' :
+                               runDir.startsWith('ar') ? 'RNA (Tumor)' :
+                               runDir.startsWith('nd') ? 'DNA (Normal)' :
+                               runDir.startsWith('nr') ? 'RNA (Control)' :
+                               isMultiSample ? 'Multi-Sample' : '';
 
-    // QC Section Component
-    const QCSection = ({ title, icon, data, cohortData }) => {
-      const [expanded, setExpanded] = useState(false);
-
-      return (
-        <div className="border border-gray-200 rounded-lg">
-          <button
-            onClick={() => setExpanded(!expanded)}
-            className="w-full p-4 flex items-center justify-between text-left hover:bg-gray-50 transition"
-          >
-            <div className="flex items-center gap-3">
-              <Icon name={icon} size={20} className="text-gray-600" />
-              <span className="font-medium text-gray-800">{title}</span>
-              {data?.status && <QCStatusBadge status={data.status} />}
-            </div>
-            <Icon name={expanded ? 'chevron-up' : 'chevron-down'} size={20} className="text-gray-500" />
-          </button>
-
-          {expanded && (
-            <div className="p-4 pt-0 border-t border-gray-200">
-              {data?.metrics ? (
-                <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-                  {Object.entries(data.metrics).map(([key, value]) => (
-                    <div key={key} className="bg-gray-50 p-3 rounded">
-                      <div className="text-xs text-gray-500 mb-1">{key.replace(/_/g, ' ')}</div>
-                      <div className="text-sm font-semibold text-gray-800">
-                        {typeof value === 'number' ? value.toLocaleString() : value}
-                      </div>
-                      {cohortData?.metrics?.[key] && (
-                        <div className="text-xs text-gray-400 mt-1">
-                          Cohort avg: {typeof cohortData.metrics[key] === 'number' ? cohortData.metrics[key].toLocaleString() : cohortData.metrics[key]}
-                        </div>
-                      )}
-                    </div>
-                  ))}
+              return (
+                <div key={runDir} className="mb-6">
+                  <div className="flex items-center gap-2 mb-3 pb-2 border-b border-gray-200">
+                    <Icon name={isMultiSample ? 'layers' : 'file'} size={16} className="text-gray-600" />
+                    <span className="font-medium text-gray-800">{runLabel}</span>
+                    {typeLabel && (
+                      <span className={`text-xs px-2 py-0.5 rounded ${
+                        runDir.startsWith('ad') ? 'bg-red-100 text-red-700' :
+                        runDir.startsWith('ar') ? 'bg-orange-100 text-orange-700' :
+                        runDir.startsWith('nd') ? 'bg-blue-100 text-blue-700' :
+                        runDir.startsWith('nr') ? 'bg-green-100 text-green-700' :
+                        'bg-gray-100 text-gray-700'
+                      }`}>{typeLabel}</span>
+                    )}
+                    <span className="text-xs text-gray-500 ml-auto">{toolNames.length} tools</span>
+                  </div>
+                  <div className="space-y-2 ml-2">
+                    {toolNames.map(toolName => (
+                      <QCToolSection
+                        key={toolName}
+                        toolName={toolName}
+                        toolData={tools[toolName]}
+                        patientId={patient}
+                      />
+                    ))}
+                  </div>
                 </div>
-              ) : (
-                <p className="text-sm text-gray-500">No metrics available for this category.</p>
-              )}
-            </div>
-          )}
+              );
+            })}
+          </div>
         </div>
       );
     };
